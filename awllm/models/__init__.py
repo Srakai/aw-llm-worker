@@ -13,6 +13,7 @@ LOG = logging.getLogger("aw-llm-worker")
 try:
     from llama_cpp import Llama
     from llama_cpp.llama_chat_format import Qwen25VLChatHandler
+
     LLAMA_CPP_AVAILABLE = True
 except ImportError:
     LLAMA_CPP_AVAILABLE = False
@@ -61,13 +62,13 @@ class QwenVLPython:
         """Classify screenshot and return structured label."""
         sys_msg = {"role": "system", "content": SYSTEM_PROMPT}
         user_msg = {"role": "user", "content": build_user_prompt(meta, ctx)}
-        
+
         out = self.llm.create_chat_completion(
             messages=[sys_msg, user_msg],
             temperature=self.temp,
             max_tokens=self.max_tokens,
         )
-        
+
         txt = out["choices"][0]["message"]["content"]
         obj = extract_json(txt)
         return self._normalize(obj)
@@ -77,20 +78,20 @@ class QwenVLPython:
         obj["coarse_activity"] = str(obj.get("coarse_activity", "misc")).lower()
         if obj["coarse_activity"] not in COARSE_ENUM:
             obj["coarse_activity"] = "misc"
-        
+
         # Clamp confidences
         try:
             obj["confidence"] = float(max(0.0, min(1.0, obj.get("confidence", 0.0))))
         except Exception:
             obj["confidence"] = 0.0
-        
+
         try:
             pj = obj.get("project") or {}
             pj["confidence"] = float(max(0.0, min(1.0, pj.get("confidence", 0.0))))
             obj["project"] = pj
         except Exception:
             obj["project"] = {"name": None, "confidence": 0.0, "reason": ""}
-        
+
         return obj
 
 
@@ -134,12 +135,18 @@ class QwenVLCLI:
 
         cmd = [
             self.cli_path,
-            "-m", self.model_path,
-            "--mmproj", self.mmproj_path,
-            "--image", img_path,
-            "--temp", str(self.temp),
-            "-n", str(self.max_tokens),
-            "-p", full_prompt,
+            "-m",
+            self.model_path,
+            "--mmproj",
+            self.mmproj_path,
+            "--image",
+            img_path,
+            "--temp",
+            str(self.temp),
+            "-n",
+            str(self.max_tokens),
+            "-p",
+            full_prompt,
         ]
 
         try:
@@ -171,18 +178,18 @@ class QwenVLCLI:
         obj["coarse_activity"] = str(obj.get("coarse_activity", "misc")).lower()
         if obj["coarse_activity"] not in COARSE_ENUM:
             obj["coarse_activity"] = "misc"
-        
+
         # Clamp confidences
         try:
             obj["confidence"] = float(max(0.0, min(1.0, obj.get("confidence", 0.0))))
         except Exception:
             obj["confidence"] = 0.0
-        
+
         try:
             pj = obj.get("project") or {}
             pj["confidence"] = float(max(0.0, min(1.0, pj.get("confidence", 0.0))))
             obj["project"] = pj
         except Exception:
             obj["project"] = {"name": None, "confidence": 0.0, "reason": ""}
-        
+
         return obj

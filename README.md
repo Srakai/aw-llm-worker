@@ -14,9 +14,10 @@ AI-powered screenshot classification worker for ActivityWatch using Qwen2.5-VL v
 ### Prerequisites
 
 - macOS with Apple Silicon (M1/M2/M3)
-- Python 3.12+
+- Python 3.12
 - [uv](https://github.com/astral-sh/uv) package manager
-- ActivityWatch running
+- [ActivityWatch running](https://activitywatch.net/)
+- [ActivityWatch Screenshots Watcher running](https://github.com/Srakai/aw-watcher-screenshot/)
 
 ### Install with Metal GPU Support
 
@@ -48,26 +49,19 @@ huggingface-cli download unsloth/Qwen2.5-VL-7B-Instruct-GGUF \
 
 ## Usage
 
-### Basic Usage (Python Library - Slower)
+### Basic Usage (llama-cpp-python)
 
 ```bash
 uv run aw_llm_worker.py --spool-dir "/Users/filip/Library/Application Support/activitywatch/Screenshots"
 ```
 
-### CLI Mode (3x Faster - Recommended!)
+### Faster execution (custom cli wrapper)
 
 ```bash
 uv run aw_llm_worker.py \
   --spool-dir "/Users/filip/Library/Application Support/activitywatch/Screenshots" \
   --use-cli
 ```
-
-The `--use-cli` flag uses `llama-mtmd-cli` directly instead of the Python library, providing:
-
-- **~12 seconds** image encoding (vs ~38 seconds with Python library)
-- **3x faster** overall performance
-- Same Metal GPU acceleration
-- No additional dependencies (uses system llama.cpp installation)
 
 ### With Context File
 
@@ -78,63 +72,9 @@ uv run aw_llm_worker.py \
   --use-cli
 ```
 
-### Custom Model Paths
-
-```bash
-uv run aw_llm_worker.py \
-  --spool-dir "/path/to/spool" \
-  --model /path/to/model.gguf \
-  --mmproj /path/to/mmproj.gguf \
-  --use-cli
-```
-
-### Specify CLI Path
-
-If `llama-mtmd-cli` is not in your PATH:
-
-```bash
-uv run aw_llm_worker.py \
-  --spool-dir "/path/to/spool" \
-  --use-cli \
-  --cli-path /usr/local/bin/llama-mtmd-cli
-```
-
-### All Options
-
-```bash
-uv run aw_llm_worker.py --help
-```
-
-## Context File Format
-
-Create a `context.yaml` file to provide project hints:
-
-```yaml
-role: "Software Engineer"
-org: "Your Company"
-
-projects:
-  - name: "ActivityWatch Development"
-    keywords:
-      - "activitywatch"
-      - "aw-"
-      - "aw_"
-      - "python"
-      - "watcher"
-
-  - name: "Web Project"
-    keywords:
-      - "react"
-      - "nextjs"
-      - "tailwind"
-
-routing:
-  prefer_exact_match: false # true = always use keyword match over LLM guess
-```
-
 ## Performance
 
-With Metal GPU acceleration on Apple Silicon:
+With Metal GPU acceleration on M2 Apple Silicon:
 
 - **Image encoding**: ~10-15 seconds
 - **Classification**: ~18 tokens/second
@@ -185,33 +125,3 @@ Events are pushed to ActivityWatch with this structure:
   }
 }
 ```
-
-## Troubleshooting
-
-### Metal GPU Not Working
-
-Check if llama-cpp-python has Metal support:
-
-```bash
-python -c "from llama_cpp import Llama; print(Llama.has_metal())"
-```
-
-If it returns `False`, reinstall with Metal flags:
-
-```bash
-CMAKE_ARGS="-DLLAMA_METAL=on" uv pip install --reinstall --no-cache llama-cpp-python
-```
-
-### Slow Performance
-
-- Ensure Metal support is enabled (see above)
-- Check GPU layers: `--n-gpu-layers -1` (default) offloads all layers
-- Monitor GPU usage with `sudo powermetrics --samplers gpu_power -i 1000`
-
-### Missing Screenshots
-
-Ensure the screenshot watcher is running and writing to the correct spool directory.
-
-## License
-
-[Add your license here]
