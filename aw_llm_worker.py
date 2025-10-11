@@ -52,15 +52,26 @@ import queue
 import hashlib
 import socket
 import logging
+import subprocess
+import shutil
 from typing import Any, Dict, Optional, List
 from datetime import datetime, timezone, timedelta
 
 import click
 from aw_client import ActivityWatchClient
 from aw_core import Event
-from llama_cpp import Llama
 
 LOG = logging.getLogger("aw-llm-worker")
+
+# Import llama_cpp modules at module level (not conditionally)
+try:
+    from llama_cpp import Llama
+    from llama_cpp.llama_chat_format import Qwen25VLChatHandler
+
+    LLAMA_CPP_AVAILABLE = True
+except ImportError:
+    LLAMA_CPP_AVAILABLE = False
+    LOG.warning("llama-cpp-python not available, only CLI mode will work")
 
 
 # --------- utils
@@ -180,12 +191,9 @@ SYSTEM_PROMPT = f"""
 You are a strict JSON classifier for screenshots. No preamble, no markdown.
 Return a single JSON object. If uncertain, choose "misc" with lower confidence.
 
-In tags place any visible keywords, project names etc.
 JSON schema:
 {{
-  "what_do_i_see_here": string,    # <= 20 words explaining your choice
   "what_user_might_be_doing": string, # <= 20 words explaining your choice
-  "what_user_wants_me_to_write_about_this": string, # <= 20 words explaining your choice
   "coarse_activity": one of {COARSE_ENUM},
   "app_guess": string,             # application name (guess if needed)
   "summary": string,               # <= 40 words describing the task
@@ -276,8 +284,8 @@ def route_project_keywords(
     return label
 
 
-# --------- inference core
-class QwenVL:
+# --------- inference core (Python library)
+class QwenVLPython:
     def __init__(
         self,
         model_path: str,
@@ -289,17 +297,19 @@ class QwenVL:
         threads: int,
         verbose: bool,
     ):
-        self.model_path = model_path
-        self.mmproj_path = mmproj_path
-        self.temp = temp
-        self.max_tokens = max_tokens
+        if not LLAMA_CPP_AVAILABLE:
+            raise RuntimeError("llama-cpp-python not available")
+
+        # Initialize chat handler with the mmproj (CLIP) model
+        chat_handler = Qwen25VLChatHandler(clip_model_path=mmproj_path, verbose=verbose)
+
+        # Initialize Llama with the chat handler
         self.llm = Llama(
             model_path=model_path,
-            mmproj_path=mmproj_path,
+            chat_handler=chat_handler,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
             n_threads=threads,
-            chat_format="qwen",  # Use chatml format which is compatible
             logits_all=False,
             verbose=verbose,
         )
@@ -316,7 +326,111 @@ class QwenVL:
         )
         txt = out["choices"][0]["message"]["content"]
         obj = extract_json(txt)
-        print(obj)
+        return self._normalize(obj)
+
+    def _normalize(self, obj: Dict[str, Any]) -> Dict[str, Any]:
+        # basic normalization
+        obj["coarse_activity"] = str(obj.get("coarse_activity", "misc")).lower()
+        if obj["coarse_activity"] not in COARSE_ENUM:
+            obj["coarse_activity"] = "misc"
+        # clamp confidences
+        try:
+            obj["confidence"] = float(max(0.0, min(1.0, obj.get("confidence", 0.0))))
+        except Exception:
+            obj["confidence"] = 0.0
+        try:
+            pj = obj.get("project") or {}
+            pj["confidence"] = float(max(0.0, min(1.0, pj.get("confidence", 0.0))))
+            obj["project"] = pj
+        except Exception:
+            obj["project"] = {"name": None, "confidence": 0.0, "reason": ""}
+        return obj
+
+
+# --------- inference core (CLI wrapper - 3x faster!)
+class QwenVLCLI:
+    def __init__(
+        self,
+        model_path: str,
+        mmproj_path: str,
+        n_ctx: int,
+        n_gpu_layers: int,
+        temp: float,
+        max_tokens: int,
+        threads: int,
+        verbose: bool,
+        cli_path: Optional[str] = None,
+    ):
+        self.model_path = model_path
+        self.mmproj_path = mmproj_path
+        self.temp = temp
+        self.max_tokens = max_tokens
+        self.n_ctx = n_ctx
+        self.n_gpu_layers = n_gpu_layers
+        self.threads = threads
+        self.verbose = verbose
+
+        # Find llama-mtmd-cli binary
+        if cli_path and os.path.exists(cli_path):
+            self.cli_path = cli_path
+        else:
+            self.cli_path = shutil.which("llama-mtmd-cli")
+            if not self.cli_path:
+                raise RuntimeError(
+                    "llama-mtmd-cli not found in PATH. Install llama.cpp CLI tools or specify --cli-path"
+                )
+        LOG.info("Using CLI: %s", self.cli_path)
+
+    def classify(
+        self, img_path: str, meta: Dict[str, Any], ctx: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        # Build the full prompt including system message
+        full_prompt = f"{SYSTEM_PROMPT}\n\nUser: Classify what the user is doing now. If matches any project by keywords, set project.name accordingly."
+
+        # Construct CLI command - match the working command format
+        cmd = [
+            self.cli_path,
+            "-m",
+            self.model_path,
+            "--mmproj",
+            self.mmproj_path,
+            "--image",
+            img_path,
+            "--temp",
+            str(self.temp),
+            "-n",
+            str(self.max_tokens),
+            "-p",
+            full_prompt,
+        ]
+
+        # Run CLI and capture output
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"CLI failed with code {result.returncode}: {result.stderr}"
+                )
+
+            # Extract JSON from output
+            output = result.stdout
+            LOG.debug("CLI output: %s", output[:500])
+            obj = extract_json(output)
+            return self._normalize(obj)
+
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("CLI timeout after 120s")
+        except Exception as e:
+            LOG.error("CLI invocation failed: %r", e)
+            raise
+
+    def _normalize(self, obj: Dict[str, Any]) -> Dict[str, Any]:
         # basic normalization
         obj["coarse_activity"] = str(obj.get("coarse_activity", "misc")).lower()
         if obj["coarse_activity"] not in COARSE_ENUM:
@@ -420,6 +534,17 @@ class AWSink:
     default="INFO",
     type=click.Choice(["DEBUG", "INFO", "WARN", "ERROR"], case_sensitive=False),
 )
+@click.option(
+    "--use-cli",
+    is_flag=True,
+    default=False,
+    help="Use llama-mtmd-cli instead of Python library (3x faster!).",
+)
+@click.option(
+    "--cli-path",
+    type=click.Path(exists=True),
+    help="Path to llama-mtmd-cli binary (auto-detected if not specified).",
+)
 def main(
     spool_dir,
     model_path,
@@ -435,6 +560,8 @@ def main(
     bucket_suffix,
     testing,
     log_level,
+    use_cli,
+    cli_path,
 ):
     logging.basicConfig(level=getattr(logging, log_level.upper()))
     LOG.info("Starting aw-llm-worker | spool=%s", spool_dir)
@@ -445,16 +572,33 @@ def main(
 
     state = State(os.path.join(spool_dir, ".llm_state.json"))
     sink = AWSink(testing=testing, bucket_suffix=bucket_suffix)
-    model = QwenVL(
-        model_path=model_path,
-        mmproj_path=mmproj_path,
-        n_ctx=n_ctx,
-        n_gpu_layers=n_gpu_layers,
-        temp=temp,
-        max_tokens=max_new,
-        threads=threads,
-        verbose=False,
-    )
+
+    # Choose inference backend
+    if use_cli:
+        LOG.info("Using CLI backend (llama-mtmd-cli) for 3x faster performance")
+        model = QwenVLCLI(
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            temp=temp,
+            max_tokens=max_new,
+            threads=threads,
+            verbose=False,
+            cli_path=cli_path,
+        )
+    else:
+        LOG.info("Using Python library backend (llama-cpp-python)")
+        model = QwenVLPython(
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            temp=temp,
+            max_tokens=max_new,
+            threads=threads,
+            verbose=False,
+        )
 
     while True:
         # find candidate spool records
