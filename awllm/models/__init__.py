@@ -6,6 +6,7 @@ import subprocess
 import shutil
 from typing import Any, Dict, Optional, List
 from awllm.prompt import SYSTEM_PROMPT, COARSE_ENUM, build_user_prompt, extract_json
+from awllm.prompts_text import build_text_classification_prompt, build_cli_text_prompt
 
 LOG = logging.getLogger("aw-llm-worker")
 
@@ -58,25 +59,13 @@ class QwenVLPython:
 
     def classify_text(self, text_content: str, topics: List[str]) -> Dict[str, Any]:
         """Classify a block of text into one of the given topics."""
-        # A specialized system prompt for text classification
-        topics_str = ", ".join(topics) if topics else "general"
-        text_system_prompt = f"""You are an expert time management assistant. Your task is to classify the user's activity based on a list of events.
-The user will provide a block of text summarizing their activity over a period of time.
-You must classify this activity into one of the following categories: {topics_str}.
-Respond with a JSON object containing "label" and "confidence" (0.0-1.0).
-Example: {{"label": "Coding", "confidence": 0.9}}"""
+        system_prompt, user_prompt = build_text_classification_prompt(
+            text_content, topics
+        )
 
-        # The user message is the text content from the time window
-        user_prompt = f"""Here is the activity log:
----
-{text_content[:2000]}
----
-Classify this activity block."""
-
-        sys_msg = {"role": "system", "content": text_system_prompt}
+        sys_msg = {"role": "system", "content": system_prompt}
         user_msg = {"role": "user", "content": user_prompt}
 
-        # Note: No image is passed in the user message content
         out = self.llm.create_chat_completion(
             messages=[sys_msg, user_msg],
             temperature=self.temp,
@@ -93,6 +82,13 @@ Classify this activity block."""
             obj["confidence"] = float(max(0.0, min(1.0, obj.get("confidence", 0.0))))
         except Exception:
             obj["confidence"] = 0.0
+
+        # Ensure project and activity_description are present
+        if "project" not in obj:
+            obj["project"] = None
+        if "activity_description" not in obj:
+            obj["activity_description"] = ""
+
         return obj
 
     def classify(
@@ -168,13 +164,7 @@ class QwenVLCLI:
 
     def classify_text(self, text_content: str, topics: List[str]) -> Dict[str, Any]:
         """Classify a block of text into one of the given topics using CLI."""
-        topics_str = ", ".join(topics) if topics else "general"
-        full_prompt = f"""You are an expert time management assistant. Classify this activity into one of: {topics_str}.
-Activity log:
----
-{text_content[:2000]}
----
-Respond with JSON: {{"label": "category", "confidence": 0.0-1.0}}"""
+        full_prompt = build_cli_text_prompt(text_content, topics)
 
         cmd = [
             self.cli_path,
@@ -213,14 +203,31 @@ Respond with JSON: {{"label": "category", "confidence": 0.0-1.0}}"""
                 )
             except Exception:
                 obj["confidence"] = 0.0
+
+            # Ensure project and activity_description are present
+            if "project" not in obj:
+                obj["project"] = None
+            if "activity_description" not in obj:
+                obj["activity_description"] = ""
+
             return obj
 
         except subprocess.TimeoutExpired:
             LOG.error("CLI timeout for text classification")
-            return {"label": "misc", "confidence": 0.0}
+            return {
+                "label": "misc",
+                "confidence": 0.0,
+                "project": None,
+                "activity_description": "",
+            }
         except Exception as e:
             LOG.error("CLI invocation failed: %r", e)
-            return {"label": "misc", "confidence": 0.0}
+            return {
+                "label": "misc",
+                "confidence": 0.0,
+                "project": None,
+                "activity_description": "",
+            }
 
     def classify(
         self, img_path: str, meta: Dict[str, Any], ctx: Dict[str, Any]

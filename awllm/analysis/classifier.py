@@ -14,6 +14,8 @@ def create_time_windows(
     frame_starts: List[datetime],
     window_size: int,
     step_size: int,
+    vscode_summary: str = "",
+    screenshot_summaries: List[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Create overlapping windows of text data from time frames.
@@ -23,11 +25,16 @@ def create_time_windows(
         frame_starts: List of start times for each time step.
         window_size: The number of time steps in each window.
         step_size: The number of time steps to advance for the next window.
+        vscode_summary: Summary of VS Code activity (shared across all windows).
+        screenshot_summaries: List of screenshot summaries to append.
 
     Returns:
         A list of windows, where each window is a dictionary containing
         the start time, end time, window index range, and concatenated text.
     """
+    if screenshot_summaries is None:
+        screenshot_summaries = []
+    
     windows = []
     for i in range(0, len(frame_texts) - window_size + 1, step_size):
         start_idx = i
@@ -42,12 +49,29 @@ def create_time_windows(
         start_time = frame_starts[start_idx]
         end_time = frame_starts[end_idx] + timedelta(seconds=dt)
 
-        # NEW APPROACH: Instead of concatenating all frame texts,
-        # extract unique events from the window and format them once
+        # Extract unique events from the window
         window_text = _summarize_window_events(frame_texts[start_idx : end_idx + 1])
 
         if not window_text:
             continue
+
+        # Build enriched content with additional context
+        enriched_content = window_text
+        
+        # Add VS Code summary if available (once per window)
+        if vscode_summary:
+            enriched_content = f"{vscode_summary}\n\n{enriched_content}"
+        
+        # Add screenshot summaries that fall within this window's time range
+        relevant_screenshots = []
+        for screenshot_summary in screenshot_summaries:
+            # Screenshot summaries already have timestamps, just include all for now
+            # In future, could filter by window time range
+            relevant_screenshots.append(screenshot_summary)
+        
+        if relevant_screenshots:
+            screenshots_text = "\n".join(relevant_screenshots)
+            enriched_content = f"{enriched_content}\n\nScreenshots:\n{screenshots_text}"
 
         windows.append(
             {
@@ -55,7 +79,9 @@ def create_time_windows(
                 "end": end_time,
                 "start_idx": start_idx,
                 "end_idx": end_idx,
-                "content": window_text,
+                "content": enriched_content,
+                "vscode_summary": vscode_summary,
+                "num_screenshots": len(relevant_screenshots),
             }
         )
     return windows
@@ -232,8 +258,10 @@ def merge_classified_windows(
         "end": valid_windows[0]["end"],
         "label": valid_windows[0]["label"],
         "confidences": [valid_windows[0]["confidence"]],
-        "content_samples": [valid_windows[0].get("content", "")[:200]],  # Keep samples
+        "content_samples": [valid_windows[0].get("content", "")[:200]],
         "num_windows": 1,
+        "project": valid_windows[0].get("project"),
+        "activity_description": valid_windows[0].get("activity_description", ""),
     }
 
     for window in valid_windows[1:]:
@@ -248,6 +276,13 @@ def merge_classified_windows(
             # Keep up to 3 content samples for reference
             if len(current_block["content_samples"]) < 3:
                 current_block["content_samples"].append(window.get("content", "")[:200])
+            # Update project if not set or if new window has higher confidence
+            if not current_block["project"] and window.get("project"):
+                current_block["project"] = window.get("project")
+            # Merge activity descriptions (prefer longer, more detailed ones)
+            new_desc = window.get("activity_description", "")
+            if len(new_desc) > len(current_block["activity_description"]):
+                current_block["activity_description"] = new_desc
         else:
             # Finalize current block
             duration_s = (current_block["end"] - current_block["start"]).total_seconds()
@@ -266,6 +301,8 @@ def merge_classified_windows(
                     ),
                     "min_confidence": float(min(current_block["confidences"])),
                     "max_confidence": float(max(current_block["confidences"])),
+                    "project": current_block["project"],
+                    "activity_description": current_block["activity_description"],
                 }
             )
 
@@ -277,6 +314,8 @@ def merge_classified_windows(
                 "confidences": [window["confidence"]],
                 "content_samples": [window.get("content", "")[:200]],
                 "num_windows": 1,
+                "project": window.get("project"),
+                "activity_description": window.get("activity_description", ""),
             }
 
     # Don't forget the last block
@@ -296,6 +335,8 @@ def merge_classified_windows(
             ),
             "min_confidence": float(min(current_block["confidences"])),
             "max_confidence": float(max(current_block["confidences"])),
+            "project": current_block["project"],
+            "activity_description": current_block["activity_description"],
         }
     )
 

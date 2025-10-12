@@ -145,7 +145,9 @@ CMAKE_ARGS="-DLLAMA_METAL=on" uv pip install --reinstall --no-cache llama-cpp-py
       "label": "Coding",
       "confidence": 0.75,
       "min_confidence": 0.65,
-      "max_confidence": 0.85
+      "max_confidence": 0.85,
+      "project": "aw-llm-worker",
+      "activity_description": "Refactoring prompt templates and updating data models to include project detection"
     },
     "analysis": {
       "duration_minutes": 45.2,
@@ -175,11 +177,7 @@ CMAKE_ARGS="-DLLAMA_METAL=on" uv pip install --reinstall --no-cache llama-cpp-py
 
 - **Bucket**: `aw-watcher-screenshot-llm_{hostname}`
 - **Event Type**: `app.screenshot.label`
-- **Data Schema**: (existing format with label, project, tags, etc.)
-
-#### Output Schema
-
-Events are pushed to ActivityWatch with this structure:
+- **Data Schema**:
 
 ```json
 {
@@ -216,6 +214,30 @@ Events are pushed to ActivityWatch with this structure:
   }
 }
 ```
+
+## Data Model
+
+### LLM Blocks (Time Summarization)
+
+The summarization feature now extracts:
+
+1. **Activity Classification**: Category of work (Coding, Writing, etc.)
+2. **Project Detection**: Automatically identifies which project you're working on
+3. **Activity Description**: Brief description of what you're actually doing (max 50 words)
+4. **Confidence Metrics**: Min, max, and average confidence across merged windows
+5. **Analysis Metadata**: Duration, number of windows, content samples
+
+**Example Block:**
+
+- **Label**: "Coding"
+- **Project**: "aw-llm-worker"
+- **Activity**: "Refactoring prompt templates and updating data models to include project detection"
+- **Duration**: 45.2 minutes
+- **Confidence**: 0.75 (range: 0.65-0.85)
+
+### Screenshot Events
+
+Screenshot events include similar structured data with visual context from the screenshot image.
 
 ## Development Notes
 

@@ -30,6 +30,7 @@ from awllm.analysis.io import (
     fetch_aw_events,
     load_events_for_discretization,
     emit_blocks_to_aw,
+    separate_events_by_source,
 )
 
 LOG = logging.getLogger("aw-llm-worker")
@@ -185,13 +186,35 @@ def run_summarization(
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=lookback_hours)
 
-    # 1. Fetch and discretize data
-    raw_events = fetch_aw_events(source_buckets, start, end, host=aw_host)
-    events = load_events_for_discretization(raw_events)
+    # 1. Fetch events from all buckets including vscode and screenshots
+    # Automatically add vscode and screenshot buckets if not specified
+    all_buckets = list(source_buckets)
+    
+    # Add VS Code bucket
+    vscode_bucket = f"aw-watcher-vscode_{hostname}"
+    if vscode_bucket not in all_buckets:
+        all_buckets.append(vscode_bucket)
+    
+    # Add screenshot bucket
+    screenshot_bucket = f"aw-watcher-screenshot-llm_{hostname}"
+    if screenshot_bucket not in all_buckets:
+        all_buckets.append(screenshot_bucket)
+    
+    LOG.info(f"Fetching from buckets: {all_buckets}")
+    raw_events = fetch_aw_events(all_buckets, start, end, host=aw_host)
+    
+    # Separate events by source
+    events, vscode_summary, screenshot_summaries = separate_events_by_source(raw_events)
 
     if not events:
         LOG.info("No events to summarize.")
         return
+    
+    LOG.info(f"Loaded {len(events)} regular events")
+    if vscode_summary:
+        LOG.info(f"VS Code summary: {vscode_summary}")
+    if screenshot_summaries:
+        LOG.info(f"Found {len(screenshot_summaries)} screenshot summaries")
 
     sketch = HashSketch(dim=sketch_dim, ngram=(1, 2))
     M, frame_starts, frame_texts = discretize(events, start, end, dt_seconds, sketch)
@@ -200,7 +223,7 @@ def run_summarization(
         LOG.info("No data to process after discretization.")
         return
 
-    # 2. Create sliding windows of text
+    # 2. Create sliding windows of text with enriched context
     # Get windowing parameters from topics config or use defaults
     window_duration_m = topics.get("_config", {}).get("window_duration_m", 30)
     window_step_m = topics.get("_config", {}).get("window_step_m", 5)
@@ -214,7 +237,12 @@ def run_summarization(
     )
 
     windows = create_time_windows(
-        frame_texts, frame_starts, window_size_steps, step_size_steps
+        frame_texts, 
+        frame_starts, 
+        window_size_steps, 
+        step_size_steps,
+        vscode_summary=vscode_summary,
+        screenshot_summaries=screenshot_summaries,
     )
 
     if not windows:
@@ -222,6 +250,8 @@ def run_summarization(
         return
 
     LOG.info(f"Created {len(windows)} time windows to classify.")
+    if windows and windows[0].get("num_screenshots"):
+        LOG.info(f"Each window enriched with {windows[0]['num_screenshots']} screenshot summaries")
 
     # 3. Load LLM model for text classification
     LOG.info("Loading LLM model for text classification...")

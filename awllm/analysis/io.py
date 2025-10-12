@@ -3,7 +3,7 @@
 import requests
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from .aggregator import Event
 
 LOG = logging.getLogger("aw-llm-worker")
@@ -12,6 +12,129 @@ LOG = logging.getLogger("aw-llm-worker")
 def _iso(dt: datetime) -> str:
     """Convert datetime to ISO format for ActivityWatch."""
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def extract_vscode_summary(events: List[Dict]) -> str:
+    """
+    Extract a summary of VS Code activity from aw-watcher-vscode events.
+    
+    Args:
+        events: List of VS Code watcher events
+        
+    Returns:
+        Summary string like "VSCode: project1 (3 files), project2 (2 files)"
+    """
+    if not events:
+        return ""
+    
+    # Aggregate by project
+    project_files = {}
+    
+    for ev in events:
+        d = ev.get("data", {})
+        project = d.get("project", "unknown")
+        file_path = d.get("file", "")
+        
+        if project not in project_files:
+            project_files[project] = set()
+        
+        if file_path:
+            project_files[project].add(file_path)
+    
+    # Format summary
+    parts = []
+    for project, files in sorted(project_files.items(), key=lambda x: len(x[1]), reverse=True):
+        if project and project != "unknown":
+            parts.append(f"{project} ({len(files)} files)")
+    
+    if parts:
+        return "VSCode: " + ", ".join(parts[:3])  # Limit to top 3 projects
+    return ""
+
+
+def extract_screenshot_summaries(events: List[Dict]) -> List[str]:
+    """
+    Extract all screenshot summaries from screenshot-llm events.
+    
+    Args:
+        events: List of screenshot watcher events
+        
+    Returns:
+        List of summary strings with timestamps
+    """
+    summaries = []
+    
+    for ev in events:
+        d = ev.get("data", {})
+        label = d.get("label", {})
+        
+        if not label:
+            continue
+        
+        summary = label.get("summary", "")
+        activity = label.get("coarse_activity", "")
+        app = label.get("app_guess", "")
+        timestamp = ev.get("timestamp", "")
+        
+        if summary:
+            # Parse timestamp for display
+            try:
+                ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                time_str = ts_dt.strftime("%H:%M")
+            except:
+                time_str = ""
+            
+            # Format: "HH:MM [app] summary"
+            formatted = f"{time_str} [{app or activity}] {summary}" if time_str else f"[{app or activity}] {summary}"
+            summaries.append(formatted)
+    
+    return summaries
+
+
+def separate_events_by_source(
+    aw_events_by_bucket: Dict[str, List[Dict]]
+) -> Tuple[List[Event], str, List[str]]:
+    """
+    Separate events into regular events, VS Code summary, and screenshot summaries.
+    
+    Args:
+        aw_events_by_bucket: Raw events grouped by bucket
+        
+    Returns:
+        Tuple of (regular_events, vscode_summary, screenshot_summaries)
+    """
+    regular_events = []
+    vscode_summary = ""
+    screenshot_summaries = []
+    
+    for bid, event_list in aw_events_by_bucket.items():
+        # Handle VS Code events separately
+        if "aw-watcher-vscode" in bid:
+            vscode_summary = extract_vscode_summary(event_list)
+            continue
+        
+        # Handle screenshot events separately
+        if "aw-watcher-screenshot-llm" in bid or "aw-llm-blocks" in bid:
+            screenshot_summaries.extend(extract_screenshot_summaries(event_list))
+            continue
+        
+        # Process regular events (window, afk, etc.)
+        for ev in event_list:
+            ts_str = ev.get("timestamp")
+            if not ts_str:
+                continue
+
+            try:
+                st = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                dur = ev.get("duration", 0.0)
+                en = st + timedelta(seconds=dur)
+                text = aw_event_to_text(bid, ev)
+                if text:
+                    regular_events.append(Event(st, en, text, 1.0))
+            except (ValueError, TypeError):
+                continue
+    
+    return regular_events, vscode_summary, screenshot_summaries
 
 
 def fetch_aw_events(
@@ -127,6 +250,8 @@ def emit_blocks_to_aw(
                     "confidence": seg["confidence"],
                     "min_confidence": seg.get("min_confidence", seg["confidence"]),
                     "max_confidence": seg.get("max_confidence", seg["confidence"]),
+                    "project": seg.get("project"),
+                    "activity_description": seg.get("activity_description", ""),
                 },
                 "analysis": {
                     "duration_minutes": seg.get("duration_minutes", 0),
