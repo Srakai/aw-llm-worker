@@ -39,7 +39,10 @@ class State:
         return k in self.data["seen"]
 
     def mark(self, rec: Dict[str, Any]):
-        """Mark record as processed."""
+        """Mark record as processed in memory. Does NOT save to disk."""
         k = self.key(rec)
         self.data["seen"][k] = rec.get("ts")
+
+    def save(self):
+        """Atomically save the current state to disk."""
         write_json_atomic(self.path, self.data)

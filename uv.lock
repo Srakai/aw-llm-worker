@@ -57,7 +57,9 @@ dependencies = [
     { name = "aw-core" },
     { name = "click" },
     { name = "llama-cpp-python" },
+    { name = "numpy" },
     { name = "pyyaml" },
+    { name = "requests" },
 ]
 
 [package.metadata]
@@ -66,7 +68,9 @@ requires-dist = [
     { name = "aw-core", specifier = ">=0.5.17" },
     { name = "click", specifier = ">=8.3.0" },
     { name = "llama-cpp-python", specifier = ">=0.3.16" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "requests", specifier = ">=2.31.0" },
 ]
 
 [[package]]

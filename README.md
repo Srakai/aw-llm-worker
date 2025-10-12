@@ -129,12 +129,14 @@ The project includes a custom web-based visualization that displays both LLM tim
 Add the visualization path to your `aw-server.toml` config file:
 
 **macOS/Linux:**
+
 ```bash
 # One-liner to add visualization config (modify path as needed)
 echo -e '\n[server.custom_static]\naw-llm-worker = "'$(pwd)'/visualization"' >> ~/Library/"Application Support"/activitywatch/aw-server/aw-server.toml
 ```
 
 Or manually add to `~/Library/Application Support/activitywatch/aw-server/aw-server.toml`:
+
 ```toml
 [server.custom_static]
 aw-llm-worker = "/Users/YOUR_USERNAME/code/aw-llm-worker/visualization"
@@ -143,12 +145,14 @@ aw-llm-worker = "/Users/YOUR_USERNAME/code/aw-llm-worker/visualization"
 **Windows:**
 
 Manually add to `%LOCALAPPDATA%\activitywatch\aw-server\aw-server.toml`:
+
 ```toml
 [server.custom_static]
 aw-llm-worker = '''C:\Users\YOUR_USERNAME\code\aw-llm-worker\visualization'''
 ```
 
 **Linux:**
+
 ```bash
 # One-liner to add visualization config
 echo -e '\n[server.custom_static]\naw-llm-worker = "'$(pwd)'/visualization"' >> ~/.config/activitywatch/aw-server/aw-server.toml

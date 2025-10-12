@@ -14,11 +14,12 @@
             background: #1a1a1a;
             color: #e0e0e0;
             overflow-x: hidden;
+            min-height: 100vh;
         }
         #container {
             display: flex;
             flex-direction: column;
-            height: 100vh;
+            min-height: 100vh;
             padding: 20px;
             gap: 20px;
         }
@@ -78,15 +79,19 @@
             background: #2a2a2a;
             border-radius: 8px;
             padding: 20px;
-            min-height: 200px;
+            min-height: 450px;
         }
         .chart-container h2 {
             font-size: 18px;
             margin-bottom: 15px;
             color: #fff;
         }
+        .chart-wrapper {
+            height: 400px;
+            position: relative;
+        }
         canvas {
-            max-height: 300px;
+            max-width: 100%;
         }
         #loading {
             position: fixed;
