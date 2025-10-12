@@ -118,77 +118,6 @@ projects:
     keywords: ["myproject", "special-keyword"]
 ```
 
-## Visualization
-
-The project includes a custom web-based visualization that displays both LLM time blocks and screenshot events on an interactive timeline.
-
-### Setup Custom Visualization
-
-**Step 1: Configure ActivityWatch Server**
-
-Add the visualization path to your `aw-server.toml` config file:
-
-**macOS/Linux:**
-
-```bash
-# One-liner to add visualization config (modify path as needed)
-echo -e '\n[server.custom_static]\naw-llm-worker = "'$(pwd)'/visualization"' >> ~/Library/"Application Support"/activitywatch/aw-server/aw-server.toml
-```
-
-Or manually add to `~/Library/Application Support/activitywatch/aw-server/aw-server.toml`:
-
-```toml
-[server.custom_static]
-aw-llm-worker = "/Users/YOUR_USERNAME/code/aw-llm-worker/visualization"
-```
-
-**Windows:**
-
-Manually add to `%LOCALAPPDATA%\activitywatch\aw-server\aw-server.toml`:
-
-```toml
-[server.custom_static]
-aw-llm-worker = '''C:\Users\YOUR_USERNAME\code\aw-llm-worker\visualization'''
-```
-
-**Linux:**
-
-```bash
-# One-liner to add visualization config
-echo -e '\n[server.custom_static]\naw-llm-worker = "'$(pwd)'/visualization"' >> ~/.config/activitywatch/aw-server/aw-server.toml
-```
-
-**⚠️ Important:** Make sure you edit `aw-server.toml`, **NOT** `aw-qt.toml`!
-
-**Step 2: Restart ActivityWatch**
-
-Completely quit and restart ActivityWatch for the configuration to take effect.
-
-**Step 3: Add Custom Visualization**
-
-1. Open ActivityWatch web interface (usually http://localhost:5600)
-2. Go to **Activity** → **Edit View**
-3. Click **Add Visualization** → **Custom Visualization**
-4. Enter `aw-llm-worker` as the visualization name
-5. The timeline visualization will now appear in your activity view
-
-### Visualization Features
-
-- **📊 Activity Time Blocks** - Color-coded horizontal bars showing classified time periods (Coding, Writing, etc.)
-- **📸 Screenshot Timeline** - Interactive scatter plot of screenshot events
-- **🎨 Dark Theme** - Easy on the eyes with modern styling
-- **⏱️ Time Controls** - Adjust time range and hostname
-- **💡 Interactive Tooltips** - Hover over data points for detailed information
-- **🎯 Auto-Detection** - Automatically detects hostname from existing buckets
-
-### URL Parameters
-
-You can also open the visualization directly with custom parameters:
-
-```
-http://localhost:5600/static/aw-llm-worker/?start=2025-10-12T00:00&end=2025-10-12T23:59&hostname=YOUR_HOSTNAME
-```
-
 ## Performance
 
 With Metal GPU acceleration on M2 Apple Silicon:
@@ -202,39 +131,6 @@ If you see slow performance (>60 seconds for encoding), ensure Metal support is 
 ```bash
 CMAKE_ARGS="-DLLAMA_METAL=on" uv pip install --reinstall --no-cache llama-cpp-python
 ```
-
-## Key Features
-
-### 1. **Dual-Mode Operation**
-
-- Separate poll intervals for screenshots vs. summarization
-- Screenshots: Fast poll (0.8s default)
-- Summarization: Periodic runs (6h default)
-
-### 2. **Model Lifecycle Management**
-
-- Vision model loaded on-demand for screenshot batches
-- Automatically unloaded when no work or before summarization
-- Explicit garbage collection to free VRAM
-
-### 3. **Overlap Handling (Conv-Style)**
-
-- Events contribute fractionally to time frames based on overlap
-- Similar to 1D convolution: smooth aggregation across boundaries
-- L2-normalized frame vectors for consistent magnitude
-
-### 4. **Performance Optimizations**
-
-- State saves decoupled from marking (batch writes)
-- Pre-computed text vector cache per discretization
-- Efficient stride tricks for sliding windows
-- Batched event emission to ActivityWatch (500/batch)
-
-### 5. **Robust Error Handling**
-
-- Per-bucket fetch with graceful degradation
-- Malformed event skipping
-- Main loop exception recovery with backoff
 
 ## Output
 
@@ -256,7 +152,7 @@ CMAKE_ARGS="-DLLAMA_METAL=on" uv pip install --reinstall --no-cache llama-cpp-py
 - **Event Type**: `app.screenshot.label`
 - **Data Schema**: (existing format with label, project, tags, etc.)
 
-## Output Schema
+#### Output Schema
 
 Events are pushed to ActivityWatch with this structure:
 
@@ -298,13 +194,6 @@ Events are pushed to ActivityWatch with this structure:
 
 ## Development Notes
 
-### Why Hash-Based Text Encoding?
-
-- No vocabulary required (works with any text)
-- Deterministic (reproducible across runs)
-- Fast (no model loading)
-- Collision-resistant (SHA1-based)
-
 ### Conv1D Analogy
 
 1. **Events** → Discretized time-frame matrix `M[t, d]`
@@ -317,6 +206,4 @@ Events are pushed to ActivityWatch with this structure:
 
 - [ ] Topic discovery (unsupervised clustering)
 - [ ] Multi-scale analysis (different time resolutions)
-- [ ] Combined timeline view (blocks + screenshots on same axis)
-- [ ] Export visualization data to JSON/CSV
-- [ ] Screenshot thumbnail support in tooltips
+- [ ] Custom UI built from scratch
