@@ -180,6 +180,7 @@ def run_summarization(
     use_cli: bool,
     cli_path: Optional[str],
     log_level: str,
+    ctx: Dict[str, Any],
 ):
     """Run time-block summarization and classification using an LLM."""
     LOG.info("Starting summarization run...")
@@ -189,27 +190,27 @@ def run_summarization(
     # 1. Fetch events from all buckets including vscode and screenshots
     # Automatically add vscode and screenshot buckets if not specified
     all_buckets = list(source_buckets)
-    
+
     # Add VS Code bucket
     vscode_bucket = f"aw-watcher-vscode_{hostname}"
     if vscode_bucket not in all_buckets:
         all_buckets.append(vscode_bucket)
-    
+
     # Add screenshot bucket
     screenshot_bucket = f"aw-watcher-screenshot-llm_{hostname}"
     if screenshot_bucket not in all_buckets:
         all_buckets.append(screenshot_bucket)
-    
+
     LOG.info(f"Fetching from buckets: {all_buckets}")
     raw_events = fetch_aw_events(all_buckets, start, end, host=aw_host)
-    
+
     # Separate events by source
     events, vscode_summary, screenshot_summaries = separate_events_by_source(raw_events)
 
     if not events:
         LOG.info("No events to summarize.")
         return
-    
+
     LOG.info(f"Loaded {len(events)} regular events")
     if vscode_summary:
         LOG.info(f"VS Code summary: {vscode_summary}")
@@ -237,9 +238,9 @@ def run_summarization(
     )
 
     windows = create_time_windows(
-        frame_texts, 
-        frame_starts, 
-        window_size_steps, 
+        frame_texts,
+        frame_starts,
+        window_size_steps,
         step_size_steps,
         vscode_summary=vscode_summary,
         screenshot_summaries=screenshot_summaries,
@@ -251,7 +252,9 @@ def run_summarization(
 
     LOG.info(f"Created {len(windows)} time windows to classify.")
     if windows and windows[0].get("num_screenshots"):
-        LOG.info(f"Each window enriched with {windows[0]['num_screenshots']} screenshot summaries")
+        LOG.info(
+            f"Each window enriched with {windows[0]['num_screenshots']} screenshot summaries"
+        )
 
     # 3. Load LLM model for text classification
     LOG.info("Loading LLM model for text classification...")
@@ -290,8 +293,45 @@ def run_summarization(
     topic_names = [k for k in topics.keys() if not k.startswith("_")]
     LOG.info(f"Classifying windows into topics: {topic_names}")
 
+    # Extract projects from context for LLM
+    projects = ctx.get("projects", [])
+    if projects:
+        LOG.info(f"Using {len(projects)} project definitions for classification")
+
     try:
-        classified_windows = classify_windows_with_llm(windows, model, topic_names)
+        classified_windows = classify_windows_with_llm(
+            windows, model, topic_names, projects
+        )
+
+        # Apply keyword-based project routing to boost/override LLM results
+        for window in classified_windows:
+            # Build a "meta" dict from window content for keyword matching
+            content = window.get("content", "")
+            meta = {
+                "title": content[:200],  # Use first part of content
+                "app": "",  # We don't have individual app info at window level
+            }
+
+            # Apply keyword routing similar to screenshots
+            # Create a temporary label dict to pass through route_project_keywords
+            temp_label = {
+                "project": {
+                    "name": window.get("project"),
+                    "confidence": 0.5 if window.get("project") else 0.0,
+                    "reason": "LLM classification",
+                }
+            }
+
+            # Route and update
+            routed_label = route_project_keywords(meta, ctx, temp_label)
+
+            # Update window with routed project info
+            if routed_label.get("project"):
+                window["project"] = routed_label["project"].get("name")
+                # Optionally log if keywords boosted the project
+                if routed_label["project"].get("confidence", 0) > 0.6:
+                    LOG.debug(f"Keyword boost: {routed_label['project'].get('reason')}")
+
     except Exception as e:
         LOG.error(f"Failed to classify windows: {e}")
         return
@@ -808,6 +848,7 @@ def main(
                         use_cli=use_cli,
                         cli_path=cli_path,
                         log_level=log_level,
+                        ctx=ctx,
                     )
                     last_summarization = now
 

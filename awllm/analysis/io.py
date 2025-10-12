@@ -17,36 +17,38 @@ def _iso(dt: datetime) -> str:
 def extract_vscode_summary(events: List[Dict]) -> str:
     """
     Extract a summary of VS Code activity from aw-watcher-vscode events.
-    
+
     Args:
         events: List of VS Code watcher events
-        
+
     Returns:
         Summary string like "VSCode: project1 (3 files), project2 (2 files)"
     """
     if not events:
         return ""
-    
+
     # Aggregate by project
     project_files = {}
-    
+
     for ev in events:
         d = ev.get("data", {})
         project = d.get("project", "unknown")
         file_path = d.get("file", "")
-        
+
         if project not in project_files:
             project_files[project] = set()
-        
+
         if file_path:
             project_files[project].add(file_path)
-    
+
     # Format summary
     parts = []
-    for project, files in sorted(project_files.items(), key=lambda x: len(x[1]), reverse=True):
+    for project, files in sorted(
+        project_files.items(), key=lambda x: len(x[1]), reverse=True
+    ):
         if project and project != "unknown":
             parts.append(f"{project} ({len(files)} files)")
-    
+
     if parts:
         return "VSCode: " + ", ".join(parts[:3])  # Limit to top 3 projects
     return ""
@@ -55,27 +57,27 @@ def extract_vscode_summary(events: List[Dict]) -> str:
 def extract_screenshot_summaries(events: List[Dict]) -> List[str]:
     """
     Extract all screenshot summaries from screenshot-llm events.
-    
+
     Args:
         events: List of screenshot watcher events
-        
+
     Returns:
         List of summary strings with timestamps
     """
     summaries = []
-    
+
     for ev in events:
         d = ev.get("data", {})
         label = d.get("label", {})
-        
+
         if not label:
             continue
-        
+
         summary = label.get("summary", "")
         activity = label.get("coarse_activity", "")
         app = label.get("app_guess", "")
         timestamp = ev.get("timestamp", "")
-        
+
         if summary:
             # Parse timestamp for display
             try:
@@ -83,41 +85,45 @@ def extract_screenshot_summaries(events: List[Dict]) -> List[str]:
                 time_str = ts_dt.strftime("%H:%M")
             except:
                 time_str = ""
-            
+
             # Format: "HH:MM [app] summary"
-            formatted = f"{time_str} [{app or activity}] {summary}" if time_str else f"[{app or activity}] {summary}"
+            formatted = (
+                f"{time_str} [{app or activity}] {summary}"
+                if time_str
+                else f"[{app or activity}] {summary}"
+            )
             summaries.append(formatted)
-    
+
     return summaries
 
 
 def separate_events_by_source(
-    aw_events_by_bucket: Dict[str, List[Dict]]
+    aw_events_by_bucket: Dict[str, List[Dict]],
 ) -> Tuple[List[Event], str, List[str]]:
     """
     Separate events into regular events, VS Code summary, and screenshot summaries.
-    
+
     Args:
         aw_events_by_bucket: Raw events grouped by bucket
-        
+
     Returns:
         Tuple of (regular_events, vscode_summary, screenshot_summaries)
     """
     regular_events = []
     vscode_summary = ""
     screenshot_summaries = []
-    
+
     for bid, event_list in aw_events_by_bucket.items():
         # Handle VS Code events separately
         if "aw-watcher-vscode" in bid:
             vscode_summary = extract_vscode_summary(event_list)
             continue
-        
+
         # Handle screenshot events separately
         if "aw-watcher-screenshot-llm" in bid or "aw-llm-blocks" in bid:
             screenshot_summaries.extend(extract_screenshot_summaries(event_list))
             continue
-        
+
         # Process regular events (window, afk, etc.)
         for ev in event_list:
             ts_str = ev.get("timestamp")
@@ -133,7 +139,7 @@ def separate_events_by_source(
                     regular_events.append(Event(st, en, text, 1.0))
             except (ValueError, TypeError):
                 continue
-    
+
     return regular_events, vscode_summary, screenshot_summaries
 
 

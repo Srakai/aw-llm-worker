@@ -57,10 +57,15 @@ class QwenVLPython:
             verbose=verbose,
         )
 
-    def classify_text(self, text_content: str, topics: List[str]) -> Dict[str, Any]:
+    def classify_text(
+        self,
+        text_content: str,
+        topics: List[str],
+        projects: List[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Classify a block of text into one of the given topics."""
         system_prompt, user_prompt = build_text_classification_prompt(
-            text_content, topics
+            text_content, topics, projects
         )
 
         sys_msg = {"role": "system", "content": system_prompt}
@@ -162,9 +167,14 @@ class QwenVLCLI:
                 )
         LOG.info("Using CLI: %s", self.cli_path)
 
-    def classify_text(self, text_content: str, topics: List[str]) -> Dict[str, Any]:
+    def classify_text(
+        self,
+        text_content: str,
+        topics: List[str],
+        projects: List[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Classify a block of text into one of the given topics using CLI."""
-        full_prompt = build_cli_text_prompt(text_content, topics)
+        full_prompt = build_cli_text_prompt(text_content, topics, projects)
 
         cmd = [
             self.cli_path,

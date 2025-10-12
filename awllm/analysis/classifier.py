@@ -34,7 +34,7 @@ def create_time_windows(
     """
     if screenshot_summaries is None:
         screenshot_summaries = []
-    
+
     windows = []
     for i in range(0, len(frame_texts) - window_size + 1, step_size):
         start_idx = i
@@ -57,18 +57,18 @@ def create_time_windows(
 
         # Build enriched content with additional context
         enriched_content = window_text
-        
+
         # Add VS Code summary if available (once per window)
         if vscode_summary:
             enriched_content = f"{vscode_summary}\n\n{enriched_content}"
-        
+
         # Add screenshot summaries that fall within this window's time range
         relevant_screenshots = []
         for screenshot_summary in screenshot_summaries:
             # Screenshot summaries already have timestamps, just include all for now
             # In future, could filter by window time range
             relevant_screenshots.append(screenshot_summary)
-        
+
         if relevant_screenshots:
             screenshots_text = "\n".join(relevant_screenshots)
             enriched_content = f"{enriched_content}\n\nScreenshots:\n{screenshots_text}"
@@ -175,7 +175,10 @@ def _summarize_window_events(frame_texts: List[str]) -> str:
 
 
 def classify_windows_with_llm(
-    windows: List[Dict[str, Any]], llm_model: Any, topics: List[str]
+    windows: List[Dict[str, Any]],
+    llm_model: Any,
+    topics: List[str],
+    projects: List[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Use an LLM to classify the content of each time window.
@@ -184,6 +187,7 @@ def classify_windows_with_llm(
         windows: List of window dictionaries with 'content', 'start', 'end' keys.
         llm_model: The LLM model instance with a classify_text method.
         topics: List of valid topic labels for classification.
+        projects: List of project definitions with keywords from context.yaml.
 
     Returns:
         List of classified windows with label and confidence added.
@@ -193,18 +197,21 @@ def classify_windows_with_llm(
     for i, window in enumerate(windows):
         try:
             # Call the LLM to classify this window's text
-            result = llm_model.classify_text(window["content"], topics)
+            result = llm_model.classify_text(window["content"], topics, projects)
 
             classified_window = {
                 **window,
                 "label": result.get("label", "misc"),
                 "confidence": result.get("confidence", 0.0),
+                "project": result.get("project"),
+                "activity_description": result.get("activity_description", ""),
             }
             classified.append(classified_window)
 
             LOG.debug(
                 f"Window {i+1}/{len(windows)}: {window['start'].strftime('%H:%M')}-{window['end'].strftime('%H:%M')} "
-                f"-> {result.get('label')} (conf={result.get('confidence', 0.0):.2f})"
+                f"-> {result.get('label')} (conf={result.get('confidence', 0.0):.2f}) "
+                f"proj={result.get('project')}"
             )
 
         except Exception as e:
@@ -215,6 +222,8 @@ def classify_windows_with_llm(
                     **window,
                     "label": "misc",
                     "confidence": 0.0,
+                    "project": None,
+                    "activity_description": "",
                 }
             )
 
