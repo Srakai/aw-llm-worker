@@ -19,9 +19,13 @@ from awllm.models import QwenVLPython, QwenVLCLI
 from awllm.prompt import PROMPT_REV, route_project_keywords
 
 # Analysis imports
-from awllm.analysis.textconv import HashSketch, conv1d_text, make_kernel_from_phrases
+from awllm.analysis.textconv import HashSketch
 from awllm.analysis.aggregator import discretize
-from awllm.analysis.classifier import find_segments, segments_to_blocks
+from awllm.analysis.classifier import (
+    create_time_windows,
+    classify_windows_with_llm,
+    merge_classified_windows,
+)
 from awllm.analysis.io import (
     fetch_aw_events,
     load_events_for_discretization,
@@ -165,13 +169,23 @@ def run_summarization(
     sketch_dim: int,
     dt_seconds: float,
     hostname: str,
+    model_path: str,
+    mmproj_path: str,
+    n_ctx: int,
+    n_gpu_layers: int,
+    temp: float,
+    max_new: int,
+    threads: int,
+    use_cli: bool,
+    cli_path: Optional[str],
+    log_level: str,
 ):
-    """Run time-block summarization and classification."""
+    """Run time-block summarization and classification using an LLM."""
     LOG.info("Starting summarization run...")
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=lookback_hours)
 
-    # Fetch and discretize data
+    # 1. Fetch and discretize data
     raw_events = fetch_aw_events(source_buckets, start, end, host=aw_host)
     events = load_events_for_discretization(raw_events)
 
@@ -180,45 +194,103 @@ def run_summarization(
         return
 
     sketch = HashSketch(dim=sketch_dim, ngram=(1, 2))
-    M, frame_starts = discretize(events, start, end, dt_seconds, sketch)
+    M, frame_starts, frame_texts = discretize(events, start, end, dt_seconds, sketch)
 
-    if M.shape[0] == 0:
-        LOG.info("No data matrix generated.")
+    if len(frame_starts) == 0:
+        LOG.info("No data to process after discretization.")
         return
 
-    all_blocks = []
+    # 2. Create sliding windows of text
+    # Get windowing parameters from topics config or use defaults
+    window_duration_m = topics.get("_config", {}).get("window_duration_m", 30)
+    window_step_m = topics.get("_config", {}).get("window_step_m", 5)
 
-    # Run classification for each topic
-    for label, config in topics.items():
-        LOG.info(f"  Classifying topic: {label}")
-        kernel = make_kernel_from_phrases(
-            config["phrases"], sketch, config["kernel_width"]
-        )
+    window_size_steps = int((window_duration_m * 60) / dt_seconds)
+    step_size_steps = int((window_step_m * 60) / dt_seconds)
 
-        # Convolve to get scores
-        scores = conv1d_text(M, kernel, stride=1, padding="same")
+    LOG.info(
+        f"Creating windows: {window_duration_m}min window, {window_step_m}min step "
+        f"({window_size_steps} steps x {step_size_steps} step)"
+    )
 
-        # Find segments above threshold
-        segments = find_segments(
-            scores,
-            threshold=config["threshold"],
-            min_duration_s=config["min_duration_s"],
-            dt=dt_seconds,
-            merge_gap_s=config.get("merge_gap_s", 60.0),
-        )
+    windows = create_time_windows(
+        frame_texts, frame_starts, window_size_steps, step_size_steps
+    )
 
-        # Convert to AW-compatible blocks
-        blocks = segments_to_blocks(segments, frame_starts, label, scores)
-        all_blocks.extend(blocks)
-        LOG.info(f"    Found {len(blocks)} blocks for '{label}'.")
+    if not windows:
+        LOG.info("No windows created from discretized data.")
+        return
 
-    # Emit all found blocks to ActivityWatch
-    if all_blocks:
+    LOG.info(f"Created {len(windows)} time windows to classify.")
+
+    # 3. Load LLM model for text classification
+    LOG.info("Loading LLM model for text classification...")
+    try:
+        if use_cli:
+            LOG.info("Using CLI backend for summarization")
+            model = QwenVLCLI(
+                model_path=model_path,
+                mmproj_path=mmproj_path,
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                temp=temp,
+                max_tokens=max_new,
+                threads=threads,
+                verbose=False,
+                cli_path=cli_path,
+            )
+        else:
+            LOG.info("Using Python library backend for summarization")
+            model = QwenVLPython(
+                model_path=model_path,
+                mmproj_path=mmproj_path,
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                temp=temp,
+                max_tokens=max_new,
+                threads=threads,
+                verbose=log_level.upper() == "DEBUG",
+            )
+    except Exception as e:
+        LOG.error(f"Failed to load model for summarization: {e}")
+        return
+
+    # 4. Classify windows with LLM
+    # Extract topic names (exclude _config if present)
+    topic_names = [k for k in topics.keys() if not k.startswith("_")]
+    LOG.info(f"Classifying windows into topics: {topic_names}")
+
+    try:
+        classified_windows = classify_windows_with_llm(windows, model, topic_names)
+    except Exception as e:
+        LOG.error(f"Failed to classify windows: {e}")
+        return
+    finally:
+        # Clean up model
+        del model
+        import gc
+
+        gc.collect()
+
+    # 5. Merge classified windows into final blocks
+    merge_gap_s = topics.get("_config", {}).get("merge_gap_s", 300.0)
+    min_confidence = topics.get("_config", {}).get("min_confidence", 0.3)
+
+    LOG.info(
+        f"Merging windows with merge_gap={merge_gap_s}s, min_confidence={min_confidence}"
+    )
+
+    final_blocks = merge_classified_windows(
+        classified_windows, merge_gap_s=merge_gap_s, min_confidence=min_confidence
+    )
+
+    # 6. Emit all found blocks to ActivityWatch
+    if final_blocks:
         bucket_id = f"aw-llm-blocks_{hostname}"
         emit_blocks_to_aw(
-            all_blocks, host=aw_host, bucket_id=bucket_id, client_name="aw-llm-worker"
+            final_blocks, host=aw_host, bucket_id=bucket_id, client_name="aw-llm-worker"
         )
-        LOG.info(f"Emitted {len(blocks)} blocks total.")
+        LOG.info(f"Emitted {len(final_blocks)} blocks total.")
     else:
         LOG.info("No blocks found to emit.")
 
@@ -347,6 +419,12 @@ def run_summarization(
     show_default=True,
     help="Time resolution for summarization (seconds).",
 )
+@click.option(
+    "--debug-format",
+    is_flag=True,
+    default=False,
+    help="Debug mode: print formatted event text and exit (no LLM).",
+)
 def main(
     mode,
     spool_dir,
@@ -371,6 +449,7 @@ def main(
     lookback_hours,
     sketch_dim,
     dt_seconds,
+    debug_format,
 ):
     """ActivityWatch LLM Worker - Dual-mode: Screenshot classification + Time summarization."""
     logging.basicConfig(
@@ -394,6 +473,117 @@ def main(
     ctx = load_yaml_or_json(context_file)
     ctx_id = sha1(json.dumps(ctx, sort_keys=True))
     LOG.info("Loaded context (id=%s)", ctx_id[:8])
+
+    # DEBUG MODE: Just format and print
+    if debug_format:
+        LOG.info("=== DEBUG FORMAT MODE ===")
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=lookback_hours)
+
+        # Get hostname
+        from aw_client import ActivityWatchClient
+
+        temp_client = ActivityWatchClient("temp", testing=testing)
+        hostname = temp_client.client_hostname
+
+        # Default source buckets if not specified
+        if not source_buckets:
+            source_buckets = [
+                f"aw-watcher-window_{hostname}",
+                f"aw-watcher-afk_{hostname}",
+            ]
+
+        LOG.info(f"Fetching from buckets: {list(source_buckets)}")
+        LOG.info(
+            f"Time range: {start.strftime('%Y-%m-%d %H:%M')} to {end.strftime('%Y-%m-%d %H:%M')}"
+        )
+
+        # Fetch and process
+        raw_events = fetch_aw_events(source_buckets, start, end, host=aw_host)
+        events = load_events_for_discretization(raw_events)
+        LOG.info(f"Loaded {len(events)} raw events")
+
+        if not events:
+            LOG.info("No events found.")
+            return
+
+        sketch = HashSketch(dim=sketch_dim, ngram=(1, 2))
+        M, frame_starts, frame_texts = discretize(
+            events, start, end, dt_seconds, sketch
+        )
+
+        LOG.info(f"Created {len(frame_texts)} frames")
+
+        # Print sample frames
+        print("\n" + "=" * 80)
+        print("SAMPLE FORMATTED FRAMES (first 10 non-empty):")
+        print("=" * 80)
+
+        count = 0
+        for i, (frame_start, text) in enumerate(zip(frame_starts, frame_texts)):
+            if text.strip() and count < 10:
+                print(f"\nFrame {i} [{frame_start.strftime('%Y-%m-%d %H:%M:%S')}]:")
+                print(f"  Length: {len(text)} chars")
+                print(f"  Content: {text[:500]}{'...' if len(text) > 500 else ''}")
+                count += 1
+
+        print("\n" + "=" * 80)
+        print("FRAME STATISTICS:")
+        print("=" * 80)
+        non_empty = [t for t in frame_texts if t.strip()]
+        if non_empty:
+            lengths = [len(t) for t in non_empty]
+            print(f"Total frames: {len(frame_texts)}")
+            print(f"Non-empty frames: {len(non_empty)}")
+            print(f"Avg length: {sum(lengths)/len(lengths):.1f} chars")
+            print(f"Min length: {min(lengths)} chars")
+            print(f"Max length: {max(lengths)} chars")
+        else:
+            print("No non-empty frames!")
+
+        print("\n" + "=" * 80)
+        print("TESTING WINDOW CREATION:")
+        print("=" * 80)
+
+        # Test window creation with deduplication
+        topics = ctx.get("topics", {})
+        window_duration_m = topics.get("_config", {}).get("window_duration_m", 30)
+        window_step_m = topics.get("_config", {}).get("window_step_m", 5)
+
+        window_size_steps = int((window_duration_m * 60) / dt_seconds)
+        step_size_steps = int((window_step_m * 60) / dt_seconds)
+
+        print(f"Window size: {window_duration_m}min ({window_size_steps} steps)")
+        print(f"Step size: {window_step_m}min ({step_size_steps} steps)")
+
+        windows = create_time_windows(
+            frame_texts, frame_starts, window_size_steps, step_size_steps
+        )
+
+        print(f"Created {len(windows)} windows")
+
+        # Show first 5 windows with their deduplicated content
+        print("\n" + "=" * 80)
+        print("SAMPLE WINDOWS (first 5):")
+        print("=" * 80)
+
+        for i, window in enumerate(windows[:5]):
+            print(f"\nWindow {i+1}:")
+            print(
+                f"  Time: {window['start'].strftime('%H:%M')} - {window['end'].strftime('%H:%M')}"
+            )
+            print(f"  Content length: {len(window['content'])} chars")
+            print(f"  Content preview:")
+            # Show first 400 chars with better formatting
+            preview = window["content"][:400]
+            if len(window["content"]) > 400:
+                preview += "..."
+            # Split into multiple lines for readability
+            for line in [preview[i : i + 80] for i in range(0, len(preview), 80)]:
+                print(f"    {line}")
+
+        print("\n" + "=" * 80)
+        return
 
     # Initialize screenshot components if needed
     state = None
@@ -550,6 +740,16 @@ def main(
                         sketch_dim=sketch_dim,
                         dt_seconds=dt_seconds,
                         hostname=hostname,
+                        model_path=model_path,
+                        mmproj_path=mmproj_path,
+                        n_ctx=n_ctx,
+                        n_gpu_layers=n_gpu_layers,
+                        temp=temp,
+                        max_new=max_new,
+                        threads=threads,
+                        use_cli=use_cli,
+                        cli_path=cli_path,
+                        log_level=log_level,
                     )
                     last_summarization = now
 

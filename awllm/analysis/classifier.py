@@ -1,87 +1,274 @@
-"""Classify aggregated time events into larger blocks."""
+"""Classify aggregated time events into larger blocks using an LLM."""
 
+import logging
 import numpy as np
+import re
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple
+from typing import List, Dict, Any
+
+LOG = logging.getLogger("aw-llm-worker")
 
 
-def find_segments(
-    scores: np.ndarray,
-    threshold: float,
-    min_duration_s: float,
-    dt: float,
-    merge_gap_s: float = 60.0,
-) -> List[Tuple[int, int]]:
-    """
-    Find contiguous segments where score is above a threshold.
-    Merges segments that are close to each other.
-    """
-    if scores.size == 0:
-        return []
-
-    above_threshold = np.where(scores > threshold)[0]
-    if not len(above_threshold):
-        return []
-
-    # Find contiguous segments
-    segments = []
-    start_idx = above_threshold[0]
-    for i in range(1, len(above_threshold)):
-        if above_threshold[i] > above_threshold[i - 1] + 1:
-            segments.append((start_idx, above_threshold[i - 1]))
-            start_idx = above_threshold[i]
-    segments.append((start_idx, above_threshold[-1]))
-
-    # Merge close segments
-    merge_gap_steps = int(merge_gap_s / dt)
-    if not segments:
-        return []
-
-    merged = [segments[0]]
-    for current_start, current_end in segments[1:]:
-        last_start, last_end = merged[-1]
-        if current_start - last_end <= merge_gap_steps:
-            merged[-1] = (last_start, current_end)
-        else:
-            merged.append((current_start, current_end))
-
-    # Filter for minimum duration
-    min_len_steps = int(min_duration_s / dt)
-    final_segments = [(s, e) for s, e in merged if (e - s + 1) >= min_len_steps]
-
-    return final_segments
-
-
-def segments_to_blocks(
-    segments: List[Tuple[int, int]],
+def create_time_windows(
+    frame_texts: List[str],
     frame_starts: List[datetime],
-    label: str,
-    scores: np.ndarray,
-) -> List[Dict]:
-    """Convert index-based segments to timestamped blocks with labels."""
-    blocks = []
-    if not frame_starts:
-        return blocks
+    window_size: int,
+    step_size: int,
+) -> List[Dict[str, Any]]:
+    """
+    Create overlapping windows of text data from time frames.
 
-    dt_seconds = (
-        (frame_starts[1] - frame_starts[0]).total_seconds()
-        if len(frame_starts) > 1
-        else 0
-    )
+    Args:
+        frame_texts: List of text content for each time step.
+        frame_starts: List of start times for each time step.
+        window_size: The number of time steps in each window.
+        step_size: The number of time steps to advance for the next window.
 
-    for start_idx, end_idx in segments:
+    Returns:
+        A list of windows, where each window is a dictionary containing
+        the start time, end time, window index range, and concatenated text.
+    """
+    windows = []
+    for i in range(0, len(frame_texts) - window_size + 1, step_size):
+        start_idx = i
+        end_idx = i + window_size - 1
+
+        # Calculate time range
+        dt = (
+            (frame_starts[1] - frame_starts[0]).total_seconds()
+            if len(frame_starts) > 1
+            else 0
+        )
         start_time = frame_starts[start_idx]
-        end_time = frame_starts[end_idx] + timedelta(seconds=dt_seconds)
+        end_time = frame_starts[end_idx] + timedelta(seconds=dt)
 
-        segment_scores = scores[start_idx : end_idx + 1]
-        confidence = float(np.mean(segment_scores)) if segment_scores.size > 0 else 0.0
+        # NEW APPROACH: Instead of concatenating all frame texts,
+        # extract unique events from the window and format them once
+        window_text = _summarize_window_events(frame_texts[start_idx : end_idx + 1])
 
-        blocks.append(
+        if not window_text:
+            continue
+
+        windows.append(
             {
-                "start": start_time.isoformat(),
-                "end": end_time.isoformat(),
-                "label": label,
-                "confidence": confidence,
+                "start": start_time,
+                "end": end_time,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "content": window_text,
             }
         )
+    return windows
+
+
+def _summarize_window_events(frame_texts: List[str]) -> str:
+    """
+    Summarize a window by extracting unique events from all frames.
+    Sort by time spent and filter out irrelevant/short activities.
+
+    Args:
+        frame_texts: List of formatted frame texts
+
+    Returns:
+        Deduplicated summary of events in the window, sorted by time spent
+    """
+    # Parse all events from frame texts and track time spent
+    # Format is "HH:MM-HH:MM: event text; HH:MM: event text; ..."
+    event_time_map = {}  # event_text -> total_seconds
+
+    for frame_text in frame_texts:
+        if not frame_text.strip():
+            continue
+
+        # Split by semicolon to get individual events
+        event_parts = frame_text.split(";")
+
+        for part in event_parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            # Parse time range and extract event text
+            # Formats: "HH:MM-HH:MM: text" or "HH:MM: text"
+            if ":" in part:
+                # Find the time portion and text portion
+                match = re.match(r"(\d{2}:\d{2})(?:-(\d{2}:\d{2}))?:\s*(.+)", part)
+                if match:
+                    start_time = match.group(1)
+                    end_time = match.group(2) or start_time
+                    event_text = match.group(3).strip()
+
+                    if not event_text:
+                        continue
+
+                    # Calculate duration (rough estimate)
+                    try:
+                        start_h, start_m = map(int, start_time.split(":"))
+                        end_h, end_m = map(int, end_time.split(":"))
+                        duration_minutes = (end_h * 60 + end_m) - (
+                            start_h * 60 + start_m
+                        )
+                        if duration_minutes < 0:
+                            duration_minutes += 24 * 60  # Handle day wrap
+                        duration_seconds = duration_minutes * 60
+                    except:
+                        duration_seconds = 60  # Default to 1 minute
+
+                    # Accumulate time for this event
+                    if event_text not in event_time_map:
+                        event_time_map[event_text] = 0
+                    event_time_map[event_text] += duration_seconds
+
+    if not event_time_map:
+        return ""
+
+    # Sort by time spent (descending) and filter
+    sorted_events = sorted(event_time_map.items(), key=lambda x: x[1], reverse=True)
+
+    # Filter out very short activities (less than 2 minutes total)
+    significant_events = [
+        (text, seconds) for text, seconds in sorted_events if seconds >= 120
+    ]
+
+    # If nothing significant, take top 5 anyway
+    if not significant_events:
+        significant_events = sorted_events[:5]
+    else:
+        # Limit to top 10 most time-consuming activities
+        significant_events = significant_events[:10]
+
+    # Format as simple list (no timestamps, just activities)
+    event_texts = [text for text, _ in significant_events]
+    result = "; ".join(event_texts)
+
+    # Limit total length
+    if len(result) > 1000:
+        result = result[:1000] + "..."
+
+    return result
+
+
+def classify_windows_with_llm(
+    windows: List[Dict[str, Any]], llm_model: Any, topics: List[str]
+) -> List[Dict[str, Any]]:
+    """
+    Use an LLM to classify the content of each time window.
+
+    Args:
+        windows: List of window dictionaries with 'content', 'start', 'end' keys.
+        llm_model: The LLM model instance with a classify_text method.
+        topics: List of valid topic labels for classification.
+
+    Returns:
+        List of classified windows with label and confidence added.
+    """
+    classified = []
+
+    for i, window in enumerate(windows):
+        try:
+            # Call the LLM to classify this window's text
+            result = llm_model.classify_text(window["content"], topics)
+
+            classified_window = {
+                **window,
+                "label": result.get("label", "misc"),
+                "confidence": result.get("confidence", 0.0),
+            }
+            classified.append(classified_window)
+
+            LOG.debug(
+                f"Window {i+1}/{len(windows)}: {window['start'].strftime('%H:%M')}-{window['end'].strftime('%H:%M')} "
+                f"-> {result.get('label')} (conf={result.get('confidence', 0.0):.2f})"
+            )
+
+        except Exception as e:
+            LOG.error(f"Failed to classify window {i}: {e}")
+            # Create a fallback classification
+            classified.append(
+                {
+                    **window,
+                    "label": "misc",
+                    "confidence": 0.0,
+                }
+            )
+
+    return classified
+
+
+def merge_classified_windows(
+    classified_windows: List[Dict[str, Any]],
+    merge_gap_s: float = 300.0,
+    min_confidence: float = 0.3,
+) -> List[Dict[str, Any]]:
+    """
+    Merge consecutive windows with the same classification label into larger blocks.
+
+    Args:
+        classified_windows: List of classified window dictionaries.
+        merge_gap_s: Maximum gap in seconds to merge blocks with the same label.
+        min_confidence: Minimum confidence threshold to include a window.
+
+    Returns:
+        List of merged time blocks with start, end, label, and average confidence.
+    """
+    if not classified_windows:
+        return []
+
+    # Filter by confidence threshold
+    valid_windows = [
+        w for w in classified_windows if w.get("confidence", 0.0) >= min_confidence
+    ]
+
+    if not valid_windows:
+        LOG.info("No windows above confidence threshold.")
+        return []
+
+    # Sort by start time
+    valid_windows.sort(key=lambda w: w["start"])
+
+    blocks = []
+    current_block = {
+        "start": valid_windows[0]["start"],
+        "end": valid_windows[0]["end"],
+        "label": valid_windows[0]["label"],
+        "confidences": [valid_windows[0]["confidence"]],
+    }
+
+    for window in valid_windows[1:]:
+        gap_seconds = (window["start"] - current_block["end"]).total_seconds()
+        same_label = window["label"] == current_block["label"]
+
+        # Merge if same label and gap is small enough
+        if same_label and gap_seconds <= merge_gap_s:
+            current_block["end"] = window["end"]
+            current_block["confidences"].append(window["confidence"])
+        else:
+            # Finalize current block
+            blocks.append(
+                {
+                    "start": current_block["start"].isoformat(),
+                    "end": current_block["end"].isoformat(),
+                    "label": current_block["label"],
+                    "confidence": float(np.mean(current_block["confidences"])),
+                }
+            )
+
+            # Start new block
+            current_block = {
+                "start": window["start"],
+                "end": window["end"],
+                "label": window["label"],
+                "confidences": [window["confidence"]],
+            }
+
+    # Don't forget the last block
+    blocks.append(
+        {
+            "start": current_block["start"].isoformat(),
+            "end": current_block["end"].isoformat(),
+            "label": current_block["label"],
+            "confidence": float(np.mean(current_block["confidences"])),
+        }
+    )
+
     return blocks
