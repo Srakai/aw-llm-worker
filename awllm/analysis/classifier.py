@@ -14,7 +14,7 @@ def create_time_windows(
     frame_starts: List[datetime],
     window_size: int,
     step_size: int,
-    vscode_summary: str = "",
+    vscode_events: List[Dict] = None,
     screenshot_summaries: List[str] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -25,8 +25,8 @@ def create_time_windows(
         frame_starts: List of start times for each time step.
         window_size: The number of time steps in each window.
         step_size: The number of time steps to advance for the next window.
-        vscode_summary: Summary of VS Code activity (shared across all windows).
-        screenshot_summaries: List of screenshot summaries to append.
+        vscode_events: List of VS Code events with timestamps to filter per window.
+        screenshot_summaries: List of screenshot summaries to append (format: "HH:MM [app] summary").
 
     Returns:
         A list of windows, where each window is a dictionary containing
@@ -34,6 +34,26 @@ def create_time_windows(
     """
     if screenshot_summaries is None:
         screenshot_summaries = []
+    if vscode_events is None:
+        vscode_events = []
+
+    # Parse screenshot summaries with timestamps once
+    parsed_screenshots = []
+    for summary in screenshot_summaries:
+        # Format is "HH:MM [app] summary"
+        import re
+
+        match = re.match(r"(\d{2}):(\d{2})\s+(.+)", summary)
+        if match:
+            hour, minute, content = match.groups()
+            parsed_screenshots.append(
+                {
+                    "hour": int(hour),
+                    "minute": int(minute),
+                    "content": content,
+                    "raw": summary,
+                }
+            )
 
     windows = []
     for i in range(0, len(frame_texts) - window_size + 1, step_size):
@@ -58,16 +78,56 @@ def create_time_windows(
         # Build enriched content with additional context
         enriched_content = window_text
 
-        # Add VS Code summary if available (once per window)
-        if vscode_summary:
-            enriched_content = f"{vscode_summary}\n\n{enriched_content}"
+        # Add VS Code events that fall within this window's time range
+        relevant_vscode = []
+        buffer_minutes = 5
+        for vscode_event in vscode_events:
+            vscode_time = vscode_event.get("timestamp")
+            if vscode_time:
+                # Check if VS Code event falls within window time range
+                if vscode_time >= start_time - timedelta(
+                    minutes=buffer_minutes
+                ) and vscode_time <= end_time + timedelta(minutes=buffer_minutes):
+                    relevant_vscode.append(vscode_event.get("formatted", ""))
+
+        if relevant_vscode:
+            # Deduplicate VS Code entries (same project/file may appear multiple times)
+            unique_vscode = []
+            seen = set()
+            for entry in relevant_vscode:
+                # Extract just the content part (after timestamp)
+                content = entry.split(" ", 1)[1] if " " in entry else entry
+                if content not in seen:
+                    seen.add(content)
+                    unique_vscode.append(entry)
+
+            vscode_text = "\n".join(unique_vscode)
+            enriched_content = f"{vscode_text}\n\n{enriched_content}"
 
         # Add screenshot summaries that fall within this window's time range
         relevant_screenshots = []
-        for screenshot_summary in screenshot_summaries:
-            # Screenshot summaries already have timestamps, just include all for now
-            # In future, could filter by window time range
-            relevant_screenshots.append(screenshot_summary)
+        for screenshot in parsed_screenshots:
+            # Create a datetime for comparison (use same date as window)
+            screenshot_time = start_time.replace(
+                hour=screenshot["hour"],
+                minute=screenshot["minute"],
+                second=0,
+                microsecond=0,
+            )
+
+            # Handle day boundary crossing
+            # If screenshot time is way before window start, it might be from previous day
+            if (start_time - screenshot_time).total_seconds() > 12 * 3600:
+                screenshot_time += timedelta(days=1)
+            # If screenshot time is way after window end, it might be from next day
+            elif (screenshot_time - end_time).total_seconds() > 12 * 3600:
+                screenshot_time -= timedelta(days=1)
+
+            # Check if screenshot falls within window time range (with small buffer)
+            if screenshot_time >= start_time - timedelta(
+                minutes=buffer_minutes
+            ) and screenshot_time <= end_time + timedelta(minutes=buffer_minutes):
+                relevant_screenshots.append(screenshot["raw"])
 
         if relevant_screenshots:
             screenshots_text = "\n".join(relevant_screenshots)
@@ -80,7 +140,7 @@ def create_time_windows(
                 "start_idx": start_idx,
                 "end_idx": end_idx,
                 "content": enriched_content,
-                "vscode_summary": vscode_summary,
+                "num_vscode": len(relevant_vscode) if relevant_vscode else 0,
                 "num_screenshots": len(relevant_screenshots),
             }
         )

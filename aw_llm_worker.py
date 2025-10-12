@@ -205,15 +205,15 @@ def run_summarization(
     raw_events = fetch_aw_events(all_buckets, start, end, host=aw_host)
 
     # Separate events by source
-    events, vscode_summary, screenshot_summaries = separate_events_by_source(raw_events)
+    events, vscode_events, screenshot_summaries = separate_events_by_source(raw_events)
 
     if not events:
         LOG.info("No events to summarize.")
         return
 
     LOG.info(f"Loaded {len(events)} regular events")
-    if vscode_summary:
-        LOG.info(f"VS Code summary: {vscode_summary}")
+    if vscode_events:
+        LOG.info(f"Found {len(vscode_events)} VS Code events")
     if screenshot_summaries:
         LOG.info(f"Found {len(screenshot_summaries)} screenshot summaries")
 
@@ -242,7 +242,7 @@ def run_summarization(
         frame_starts,
         window_size_steps,
         step_size_steps,
-        vscode_summary=vscode_summary,
+        vscode_events=vscode_events,
         screenshot_summaries=screenshot_summaries,
     )
 
@@ -251,10 +251,13 @@ def run_summarization(
         return
 
     LOG.info(f"Created {len(windows)} time windows to classify.")
-    if windows and windows[0].get("num_screenshots"):
-        LOG.info(
-            f"Each window enriched with {windows[0]['num_screenshots']} screenshot summaries"
-        )
+    if windows:
+        # Log enrichment info
+        sample_window = windows[0]
+        if sample_window.get("num_vscode"):
+            LOG.info(f"Windows enriched with VS Code events (avg per window)")
+        if sample_window.get("num_screenshots"):
+            LOG.info(f"Windows enriched with screenshot summaries")
 
     # 3. Load LLM model for text classification
     LOG.info("Loading LLM model for text classification...")

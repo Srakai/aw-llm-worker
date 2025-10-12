@@ -14,44 +14,61 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def extract_vscode_summary(events: List[Dict]) -> str:
+def extract_vscode_events(events: List[Dict]) -> List[Dict]:
     """
-    Extract a summary of VS Code activity from aw-watcher-vscode events.
+    Extract VS Code events with timestamps for window-based filtering.
 
     Args:
         events: List of VS Code watcher events
 
     Returns:
-        Summary string like "VSCode: project1 (3 files), project2 (2 files)"
+        List of dicts with timestamp, project, and file information
     """
     if not events:
-        return ""
+        return []
 
-    # Aggregate by project
-    project_files = {}
-
+    vscode_events = []
     for ev in events:
         d = ev.get("data", {})
-        project = d.get("project", "unknown")
+        timestamp = ev.get("timestamp", "")
+
+        if not timestamp:
+            continue
+
+        project = d.get("project", "")
         file_path = d.get("file", "")
 
-        if project not in project_files:
-            project_files[project] = set()
+        if project or file_path:
+            try:
+                ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                time_str = ts_dt.strftime("%H:%M")
 
-        if file_path:
-            project_files[project].add(file_path)
+                # Format: "HH:MM VSCode: project/file"
+                parts = []
+                if project:
+                    parts.append(project)
+                if file_path:
+                    # Just get filename, not full path
+                    filename = (
+                        file_path.split("/")[-1] if "/" in file_path else file_path
+                    )
+                    parts.append(filename)
 
-    # Format summary
-    parts = []
-    for project, files in sorted(
-        project_files.items(), key=lambda x: len(x[1]), reverse=True
-    ):
-        if project and project != "unknown":
-            parts.append(f"{project} ({len(files)} files)")
+                content = "VSCode: " + "/".join(parts) if parts else ""
 
-    if parts:
-        return "VSCode: " + ", ".join(parts[:3])  # Limit to top 3 projects
-    return ""
+                if content:
+                    vscode_events.append(
+                        {
+                            "timestamp": ts_dt,
+                            "time_str": time_str,
+                            "content": content,
+                            "formatted": f"{time_str} {content}",
+                        }
+                    )
+            except:
+                continue
+
+    return vscode_events
 
 
 def extract_screenshot_summaries(events: List[Dict]) -> List[str]:
@@ -99,24 +116,24 @@ def extract_screenshot_summaries(events: List[Dict]) -> List[str]:
 
 def separate_events_by_source(
     aw_events_by_bucket: Dict[str, List[Dict]],
-) -> Tuple[List[Event], str, List[str]]:
+) -> Tuple[List[Event], List[Dict], List[str]]:
     """
-    Separate events into regular events, VS Code summary, and screenshot summaries.
+    Separate events into regular events, VS Code events, and screenshot summaries.
 
     Args:
         aw_events_by_bucket: Raw events grouped by bucket
 
     Returns:
-        Tuple of (regular_events, vscode_summary, screenshot_summaries)
+        Tuple of (regular_events, vscode_events, screenshot_summaries)
     """
     regular_events = []
-    vscode_summary = ""
+    vscode_events = []
     screenshot_summaries = []
 
     for bid, event_list in aw_events_by_bucket.items():
         # Handle VS Code events separately
         if "aw-watcher-vscode" in bid:
-            vscode_summary = extract_vscode_summary(event_list)
+            vscode_events = extract_vscode_events(event_list)
             continue
 
         # Handle screenshot events separately
@@ -140,7 +157,7 @@ def separate_events_by_source(
             except (ValueError, TypeError):
                 continue
 
-    return regular_events, vscode_summary, screenshot_summaries
+    return regular_events, vscode_events, screenshot_summaries
 
 
 def fetch_aw_events(
