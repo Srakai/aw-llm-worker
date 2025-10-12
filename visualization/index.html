@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AW LLM Worker - Timeline Visualization</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a1a;
+            color: #e0e0e0;
+            overflow-x: hidden;
+        }
+        #container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 20px;
+            gap: 20px;
+        }
+        h1 {
+            font-size: 24px;
+            font-weight: 600;
+            color: #fff;
+        }
+        #controls {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            padding: 15px;
+            background: #2a2a2a;
+            border-radius: 8px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .control-group label {
+            font-size: 12px;
+            color: #999;
+            text-transform: uppercase;
+        }
+        .control-group input, .control-group select {
+            padding: 8px 12px;
+            background: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 4px;
+            color: #e0e0e0;
+            font-size: 14px;
+        }
+        button {
+            padding: 8px 16px;
+            background: #4a9eff;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #3a8eef;
+        }
+        #charts {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+        }
+        .chart-container {
+            background: #2a2a2a;
+            border-radius: 8px;
+            padding: 20px;
+            min-height: 200px;
+        }
+        .chart-container h2 {
+            font-size: 18px;
+            margin-bottom: 15px;
+            color: #fff;
+        }
+        canvas {
+            max-height: 300px;
+        }
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 18px;
+            color: #999;
+        }
+        .error {
+            color: #ff6b6b;
+            padding: 20px;
+            text-align: center;
+        }
+        #tooltip {
+            position: fixed;
+            background: rgba(0, 0, 0, 0.95);
+            color: white;
+            padding: 12px;
+            border-radius: 6px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            max-width: 400px;
+            font-size: 13px;
+            border: 1px solid #444;
+            z-index: 1000;
+        }
+        #tooltip.show {
+            opacity: 1;
+        }
+        #tooltip img {
+            max-width: 300px;
+            max-height: 200px;
+            display: block;
+            margin-top: 8px;
+            border-radius: 4px;
+        }
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 10px;
+            padding: 10px;
+            background: #1a1a1a;
+            border-radius: 4px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+        }
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+<div id="container">
+    <h1>🤖 AW LLM Worker Timeline</h1>
+    
+    <div id="controls">
+        <div class="control-group">
+            <label>Start Time</label>
+            <input type="datetime-local" id="startTime">
+        </div>
+        <div class="control-group">
+            <label>End Time</label>
+            <input type="datetime-local" id="endTime">
+        </div>
+        <div class="control-group">
+            <label>Hostname</label>
+            <input type="text" id="hostname" placeholder="auto-detect">
+        </div>
+        <div class="control-group" style="justify-content: flex-end;">
+            <label>&nbsp;</label>
+            <button onclick="loadData()">Refresh</button>
+        </div>
+    </div>
+
+    <div id="charts">
+        <div class="chart-container">
+            <h2>📊 Activity Time Blocks</h2>
+            <div id="blocksLegend" class="legend"></div>
+            <canvas id="blocksChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h2>📸 Screenshot Timeline</h2>
+            <canvas id="screenshotsChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div id="loading">Loading...</div>
+<div id="tooltip"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/moment@2.29.4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.1"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.5.0/axios.min.js"></script>
+<script>
+    // A small hack to make the aw-client work in the browser without webpack
+    const exports = {};
+    function require(name){
+        if (name === 'axios') {
+            return axios;
+        }
+        throw new Error(`Cannot find module '${name}'`);
+    }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/aw-client@0.3.4/out/aw-client.min.js"></script>
+
+<script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const awHost = urlParams.get('host') || 'http://127.0.0.1:5600';
+    const client = new AWClient('viz-client', {baseURL: awHost});
+
+    let blocksChart = null;
+    let screenshotsChart = null;
+
+    // Color palette for activity blocks
+    const COLORS = {
+        'Coding': '#4a9eff',
+        'Writing': '#9b59b6',
+        'Reading': '#2ecc71',
+        'Meeting': '#e74c3c',
+        'Browsing': '#f39c12',
+        'Design': '#16a085',
+        'Terminal': '#34495e',
+        'Email': '#e67e22',
+        'default': '#95a5a6'
+    };
+
+    // Initialize datetime inputs with sensible defaults
+    function initializeTimes() {
+        const now = new Date();
+        const end = document.getElementById('endTime');
+        const start = document.getElementById('startTime');
+        
+        end.value = formatDateTimeLocal(now);
+        
+        const startTime = new Date(now.getTime() - 8 * 60 * 60 * 1000); // 8 hours ago
+        start.value = formatDateTimeLocal(startTime);
+
+        // Set from URL params if provided
+        if (urlParams.get('start')) {
+            start.value = formatDateTimeLocal(new Date(urlParams.get('start')));
+        }
+        if (urlParams.get('end')) {
+            end.value = formatDateTimeLocal(new Date(urlParams.get('end')));
+        }
+        if (urlParams.get('hostname')) {
+            document.getElementById('hostname').value = urlParams.get('hostname');
+        }
+    }
+
+    function formatDateTimeLocal(date) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        return `${year}-${month}-${day}T${hours}:${minutes}`;
+    }
+
+    async function getHostname() {
+        const inputHostname = document.getElementById('hostname').value.trim();
+        if (inputHostname) return inputHostname;
+        
+        try {
+            const response = await fetch(`${awHost}/api/0/buckets/`);
+            const buckets = await response.json();
+            const bucketNames = Object.keys(buckets);
+            
+            // Try to extract hostname from any bucket name
+            for (const name of bucketNames) {
+                const match = name.match(/_([^_]+)$/);
+                if (match) return match[1];
+            }
+        } catch (e) {
+            console.error('Failed to auto-detect hostname:', e);
+        }
+        return 'unknown';
+    }
+
+    async function loadData() {
+        const loading = document.getElementById('loading');
+        loading.style.display = 'block';
+
+        try {
+            const start = new Date(document.getElementById('startTime').value);
+            const end = new Date(document.getElementById('endTime').value);
+            const hostname = await getHostname();
+
+            // Fetch LLM blocks
+            const blocksData = await fetchEvents(`aw-llm-blocks_${hostname}`, start, end);
+            
+            // Fetch screenshots
+            const screenshotsData = await fetchEvents(`aw-watcher-screenshot-llm_${hostname}`, start, end);
+
+            renderBlocksChart(blocksData, start, end);
+            renderScreenshotsChart(screenshotsData, start, end);
+
+            loading.style.display = 'none';
+        } catch (error) {
+            loading.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            console.error('Error loading data:', error);
+        }
+    }
+
+    async function fetchEvents(bucketId, start, end) {
+        const url = `${awHost}/api/0/buckets/${bucketId}/events`;
+        const params = {
+            start: start.toISOString(),
+            end: end.toISOString(),
+            limit: -1
+        };
+        
+        try {
+            const response = await axios.get(url, { params });
+            return response.data;
+        } catch (error) {
+            console.warn(`Failed to fetch ${bucketId}:`, error.message);
+            return [];
+        }
+    }
+
+    function renderBlocksChart(events, start, end) {
+        const ctx = document.getElementById('blocksChart');
+        
+        if (blocksChart) {
+            blocksChart.destroy();
+        }
+
+        // Group events by label
+        const labelGroups = {};
+        events.forEach(event => {
+            const label = event.data?.label || 'Unknown';
+            if (!labelGroups[label]) {
+                labelGroups[label] = [];
+            }
+            
+            const eventStart = new Date(event.timestamp);
+            const eventEnd = new Date(eventStart.getTime() + event.duration * 1000);
+            
+            labelGroups[label].push({
+                x: [eventStart, eventEnd],
+                y: label,
+                confidence: event.data?.confidence || 0
+            });
+        });
+
+        // Create datasets for each label
+        const datasets = Object.entries(labelGroups).map(([label, data]) => ({
+            label: label,
+            data: data,
+            backgroundColor: COLORS[label] || COLORS.default,
+            borderColor: COLORS[label] || COLORS.default,
+            borderWidth: 2,
+            barThickness: 30
+        }));
+
+        // Update legend
+        const legendDiv = document.getElementById('blocksLegend');
+        legendDiv.innerHTML = Object.keys(labelGroups).map(label => `
+            <div class="legend-item">
+                <div class="legend-color" style="background: ${COLORS[label] || COLORS.default}"></div>
+                <span>${label}</span>
+            </div>
+        `).join('');
+
+        blocksChart = new Chart(ctx, {
+            type: 'bar',
+            data: { datasets },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'hour',
+                            displayFormats: {
+                                hour: 'HH:mm'
+                            }
+                        },
+                        min: start,
+                        max: end,
+                        grid: { color: '#333' },
+                        ticks: { color: '#999' }
+                    },
+                    y: {
+                        grid: { display: false },
+                        ticks: { color: '#999' }
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => {
+                                const data = context.raw;
+                                const duration = ((data.x[1] - data.x[0]) / 1000 / 60).toFixed(1);
+                                const conf = (data.confidence * 100).toFixed(0);
+                                return `${context.dataset.label} (${duration}min, ${conf}% conf)`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderScreenshotsChart(events, start, end) {
+        const ctx = document.getElementById('screenshotsChart');
+        
+        if (screenshotsChart) {
+            screenshotsChart.destroy();
+        }
+
+        // Map screenshots to timeline points
+        const points = events.map(event => {
+            const label = event.data?.label || {};
+            const activity = label.coarse_activity || 'misc';
+            
+            return {
+                x: new Date(event.timestamp),
+                y: Math.random() * 0.4 + 0.3, // Slight jitter for visibility
+                event: event,
+                activity: activity,
+                color: COLORS[activity.charAt(0).toUpperCase() + activity.slice(1)] || COLORS.default
+            };
+        });
+
+        screenshotsChart = new Chart(ctx, {
+            type: 'scatter',
+            data: {
+                datasets: [{
+                    label: 'Screenshots',
+                    data: points,
+                    backgroundColor: points.map(p => p.color),
+                    borderColor: points.map(p => p.color),
+                    borderWidth: 2,
+                    pointRadius: 6,
+                    pointHoverRadius: 8
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'hour',
+                            displayFormats: {
+                                hour: 'HH:mm'
+                            }
+                        },
+                        min: start,
+                        max: end,
+                        grid: { color: '#333' },
+                        ticks: { color: '#999' }
+                    },
+                    y: {
+                        display: false,
+                        min: 0,
+                        max: 1
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        enabled: false,
+                        external: (context) => {
+                            const tooltip = document.getElementById('tooltip');
+                            
+                            if (context.tooltip.opacity === 0) {
+                                tooltip.classList.remove('show');
+                                return;
+                            }
+
+                            const dataPoint = context.tooltip.dataPoints[0];
+                            const point = points[dataPoint.dataIndex];
+                            const event = point.event;
+                            const label = event.data?.label || {};
+                            const src = event.data?.src || {};
+
+                            let html = `
+                                <strong>${label.coarse_activity || 'Unknown'}</strong><br>
+                                <em>${label.app_guess || src.app || 'Unknown app'}</em><br>
+                                ${label.summary || ''}<br>
+                                <small>Confidence: ${((label.confidence || 0) * 100).toFixed(0)}%</small>
+                            `;
+
+                            // Try to show screenshot thumbnail (may fail due to CORS/file access)
+                            if (src.path) {
+                                html += `<br><small>${src.path.split('/').pop()}</small>`;
+                            }
+
+                            tooltip.innerHTML = html;
+                            tooltip.classList.add('show');
+                            
+                            const position = context.chart.canvas.getBoundingClientRect();
+                            tooltip.style.left = position.left + window.pageXOffset + dataPoint.element.x + 'px';
+                            tooltip.style.top = position.top + window.pageYOffset + dataPoint.element.y - 10 + 'px';
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Initialize on load
+    initializeTimes();
+    loadData();
+</script>
+</body>
+</html>
