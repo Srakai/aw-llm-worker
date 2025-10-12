@@ -6,7 +6,11 @@ import subprocess
 import shutil
 from typing import Any, Dict, Optional, List
 from awllm.prompt import SYSTEM_PROMPT, COARSE_ENUM, build_user_prompt, extract_json
-from awllm.prompts_text import build_text_classification_prompt, build_cli_text_prompt
+from awllm.prompts_text import (
+    build_text_classification_prompt,
+    build_cli_text_prompt,
+    build_screenshot_refinement_prompt,
+)
 
 LOG = logging.getLogger("aw-llm-worker")
 
@@ -112,6 +116,107 @@ class QwenVLPython:
         txt = out["choices"][0]["message"]["content"]
         obj = extract_json(txt)
         return self._normalize(obj)
+
+    def refine_with_screenshots(
+        self,
+        initial_classification: Dict[str, Any],
+        window_content: str,
+        screenshot_paths: List[str],
+        topics: List[str],
+        projects: List[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Refine a text classification using actual screenshot images.
+
+        Args:
+            initial_classification: The initial LLM classification result
+            window_content: The original window text content
+            screenshot_paths: List of paths to screenshot images
+            topics: List of topic categories
+            projects: List of project definitions
+
+        Returns:
+            Refined classification with enriched description
+        """
+        # First, analyze each screenshot individually
+        screenshot_descriptions = []
+        for img_path in screenshot_paths:
+            try:
+                # Build a simple prompt to describe what's in the screenshot
+                describe_prompt = "Describe what the user is doing in this screenshot. Focus on specific details: what app, what content, what actions. Be concise (max 40 words)."
+
+                user_msg = {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"file://{os.path.abspath(img_path)}"},
+                        },
+                        {"type": "text", "text": describe_prompt},
+                    ],
+                }
+
+                out = self.llm.create_chat_completion(
+                    messages=[user_msg],
+                    temperature=self.temp,
+                    max_tokens=150,
+                )
+
+                description = out["choices"][0]["message"]["content"].strip()
+                screenshot_descriptions.append(description)
+
+            except Exception as e:
+                LOG.error(f"Failed to analyze screenshot {img_path}: {e}")
+                continue
+
+        if not screenshot_descriptions:
+            LOG.warning(
+                "No screenshots could be analyzed, returning initial classification"
+            )
+            return initial_classification
+
+        # Now refine the classification using the screenshot descriptions
+        system_prompt, user_prompt = build_screenshot_refinement_prompt(
+            initial_classification,
+            window_content,
+            screenshot_descriptions,
+            topics,
+            projects,
+        )
+
+        sys_msg = {"role": "system", "content": system_prompt}
+        user_msg = {"role": "user", "content": user_prompt}
+
+        out = self.llm.create_chat_completion(
+            messages=[sys_msg, user_msg],
+            temperature=self.temp,
+            max_tokens=400,
+        )
+
+        txt = out["choices"][0]["message"]["content"]
+        obj = extract_json(txt)
+
+        # Validate and normalize
+        if "label" not in obj or obj["label"] not in topics:
+            obj["label"] = initial_classification.get("label", "misc")
+        try:
+            obj["confidence"] = float(max(0.0, min(1.0, obj.get("confidence", 0.0))))
+        except Exception:
+            obj["confidence"] = initial_classification.get("confidence", 0.0)
+
+        if "project" not in obj:
+            obj["project"] = initial_classification.get("project")
+        if "activity_description" not in obj:
+            obj["activity_description"] = initial_classification.get(
+                "activity_description", ""
+            )
+        if "screenshot_insights" not in obj:
+            obj["screenshot_insights"] = []
+
+        # Mark that this was enriched with screenshots
+        obj["enriched_with_screenshots"] = True
+        obj["num_screenshots_analyzed"] = len(screenshot_descriptions)
+
+        return obj
 
     def _normalize(self, obj: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize and validate LLM output."""
@@ -284,6 +389,136 @@ class QwenVLCLI:
         except Exception as e:
             LOG.error("CLI invocation failed: %r", e)
             raise
+
+    def refine_with_screenshots(
+        self,
+        initial_classification: Dict[str, Any],
+        window_content: str,
+        screenshot_paths: List[str],
+        topics: List[str],
+        projects: List[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Refine a text classification using actual screenshot images via CLI.
+
+        Args:
+            initial_classification: The initial LLM classification result
+            window_content: The original window text content
+            screenshot_paths: List of paths to screenshot images
+            topics: List of topic categories
+            projects: List of project definitions
+
+        Returns:
+            Refined classification with enriched description
+        """
+        # First, analyze each screenshot individually using CLI
+        screenshot_descriptions = []
+        for img_path in screenshot_paths:
+            try:
+                describe_prompt = "Describe what the user is doing in this screenshot. Focus on specific details: what app, what content, what actions. Be concise (max 40 words)."
+
+                cmd = [
+                    self.cli_path,
+                    "-m",
+                    self.model_path,
+                    "--mmproj",
+                    self.mmproj_path,
+                    "--image",
+                    img_path,
+                    "--temp",
+                    str(self.temp),
+                    "-n",
+                    "150",
+                    "-p",
+                    describe_prompt,
+                ]
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+
+                if result.returncode == 0:
+                    description = result.stdout.strip()
+                    screenshot_descriptions.append(description)
+
+            except Exception as e:
+                LOG.error(f"Failed to analyze screenshot {img_path}: {e}")
+                continue
+
+        if not screenshot_descriptions:
+            LOG.warning(
+                "No screenshots could be analyzed, returning initial classification"
+            )
+            return initial_classification
+
+        # Now refine the classification using the screenshot descriptions
+        system_prompt, user_prompt = build_screenshot_refinement_prompt(
+            initial_classification,
+            window_content,
+            screenshot_descriptions,
+            topics,
+            projects,
+        )
+
+        full_prompt = f"{system_prompt}\n\nUser: {user_prompt}"
+
+        cmd = [
+            self.cli_path,
+            "-m",
+            self.model_path,
+            "--temp",
+            str(self.temp),
+            "-n",
+            "400",
+            "-p",
+            full_prompt,
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            if result.returncode != 0:
+                LOG.error(f"CLI refinement failed: {result.stderr}")
+                return initial_classification
+
+            output = result.stdout
+            obj = extract_json(output)
+
+            # Validate and normalize
+            if "label" not in obj or obj["label"] not in topics:
+                obj["label"] = initial_classification.get("label", "misc")
+            try:
+                obj["confidence"] = float(
+                    max(0.0, min(1.0, obj.get("confidence", 0.0)))
+                )
+            except Exception:
+                obj["confidence"] = initial_classification.get("confidence", 0.0)
+
+            if "project" not in obj:
+                obj["project"] = initial_classification.get("project")
+            if "activity_description" not in obj:
+                obj["activity_description"] = initial_classification.get(
+                    "activity_description", ""
+                )
+            if "screenshot_insights" not in obj:
+                obj["screenshot_insights"] = []
+
+            # Mark that this was enriched with screenshots
+            obj["enriched_with_screenshots"] = True
+            obj["num_screenshots_analyzed"] = len(screenshot_descriptions)
+
+            return obj
+
+        except Exception as e:
+            LOG.error(f"CLI refinement failed: {e}")
+            return initial_classification
 
     def _normalize(self, obj: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize and validate LLM output."""

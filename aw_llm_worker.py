@@ -30,7 +30,10 @@ from awllm.analysis.io import (
     fetch_aw_events,
     load_events_for_discretization,
     emit_blocks_to_aw,
+    emit_raw_windows_to_aw,
+    emit_project_blocks_to_aw,
     separate_events_by_source,
+    find_screenshots_for_window,
 )
 
 LOG = logging.getLogger("aw-llm-worker")
@@ -181,6 +184,8 @@ def run_summarization(
     cli_path: Optional[str],
     log_level: str,
     ctx: Dict[str, Any],
+    spool_dir: Optional[str] = None,
+    force_screenshot_enrichment: bool = False,
 ):
     """Run time-block summarization and classification using an LLM."""
     LOG.info("Starting summarization run...")
@@ -255,7 +260,7 @@ def run_summarization(
         # Log enrichment info
         sample_window = windows[0]
         if sample_window.get("num_vscode"):
-            LOG.info(f"Windows enriched with VS Code events (avg per window)")
+            LOG.info(f"Windows enriched with VS Code events")
         if sample_window.get("num_screenshots"):
             LOG.info(f"Windows enriched with screenshot summaries")
 
@@ -335,15 +340,125 @@ def run_summarization(
                 if routed_label["project"].get("confidence", 0) > 0.6:
                     LOG.debug(f"Keyword boost: {routed_label['project'].get('reason')}")
 
+        # NEW: Process screenshot refinement requests
+        # Use forced mode or LLM decision
+        if force_screenshot_enrichment:
+            screenshot_requests = classified_windows
+            LOG.info(
+                f"Force screenshot enrichment enabled - processing all {len(screenshot_requests)} windows"
+            )
+        else:
+            screenshot_requests = [
+                w for w in classified_windows if w.get("request_screenshot_analysis")
+            ]
+
+        if screenshot_requests and spool_dir:
+            if not force_screenshot_enrichment:
+                LOG.info(
+                    f"Found {len(screenshot_requests)} windows requesting screenshot analysis"
+                )
+
+            for window in screenshot_requests:
+                try:
+                    # Find screenshots for this window
+                    screenshots = find_screenshots_for_window(
+                        spool_dir,
+                        window["start"],
+                        window["end"],
+                        max_screenshots=1,  # Default: 1 screenshot for stability
+                    )
+
+                    if screenshots:
+                        LOG.info(
+                            f"Refining window {window['start'].strftime('%H:%M')}-{window['end'].strftime('%H:%M')} "
+                            f"with {len(screenshots)} screenshot(s)"
+                        )
+
+                        # Build initial classification from window
+                        initial_classification = {
+                            "label": window.get("label", "misc"),
+                            "confidence": window.get("confidence", 0.0),
+                            "project": window.get("project"),
+                            "activity_description": window.get(
+                                "activity_description", ""
+                            ),
+                        }
+
+                        # Refine with screenshots
+                        refined = model.refine_with_screenshots(
+                            initial_classification,
+                            window.get("content", ""),
+                            screenshots,
+                            topic_names,
+                            projects,
+                        )
+
+                        # Update window with refined data
+                        window["label"] = refined.get("label", window["label"])
+                        window["confidence"] = refined.get(
+                            "confidence", window["confidence"]
+                        )
+                        window["project"] = refined.get("project", window["project"])
+                        window["activity_description"] = refined.get(
+                            "activity_description", window["activity_description"]
+                        )
+                        window["enriched_with_screenshots"] = True
+                        window["num_screenshots_analyzed"] = refined.get(
+                            "num_screenshots_analyzed", len(screenshots)
+                        )
+                        window["screenshot_insights"] = refined.get(
+                            "screenshot_insights", []
+                        )
+
+                        LOG.info(
+                            f"Refinement complete: confidence {initial_classification['confidence']:.2f} -> {refined.get('confidence', 0.0):.2f}"
+                        )
+                    else:
+                        LOG.debug(
+                            f"No screenshots found for window {window['start'].strftime('%H:%M')}-{window['end'].strftime('%H:%M')}"
+                        )
+
+                except Exception as e:
+                    LOG.error(f"Failed to refine window with screenshots: {e}")
+                    continue
+        elif screenshot_requests and not spool_dir:
+            LOG.warning(
+                f"{len(screenshot_requests)} windows requested screenshots, but no spool-dir provided"
+            )
+
     except Exception as e:
         LOG.error(f"Failed to classify windows: {e}")
         return
-    finally:
-        # Clean up model
-        del model
-        import gc
 
-        gc.collect()
+    # Build model info for metadata
+    model_info = {
+        "model": os.path.basename(model_path),
+        "backend": "cli" if use_cli else "python",
+        "temperature": temp,
+        "max_tokens": max_new,
+        "method": "text_classification",
+    }
+
+    # NEW: Emit raw classified windows to separate bucket
+    if classified_windows:
+        raw_window_bucket = f"aw-llm-windows_{hostname}"
+        LOG.info(
+            f"Emitting {len(classified_windows)} raw windows to {raw_window_bucket}"
+        )
+
+        emit_raw_windows_to_aw(
+            classified_windows,
+            host=aw_host,
+            bucket_id=raw_window_bucket,
+            client_name="aw-llm-worker",
+            model_info=model_info,
+        )
+
+    # Clean up model before merging (free memory)
+    del model
+    import gc
+
+    gc.collect()
 
     # 5. Merge classified windows into final blocks
     merge_gap_s = topics.get("_config", {}).get("merge_gap_s", 300.0)
@@ -357,19 +472,8 @@ def run_summarization(
         classified_windows, merge_gap_s=merge_gap_s, min_confidence=min_confidence
     )
 
-    # 6. Emit all found blocks to ActivityWatch
+    # 6. Emit blocks to ActivityWatch
     if final_blocks:
-        bucket_id = f"aw-llm-blocks_{hostname}"
-
-        # Build model info similar to screenshot format
-        model_info = {
-            "model": os.path.basename(model_path),
-            "backend": "cli" if use_cli else "python",
-            "temperature": temp,
-            "max_tokens": max_new,
-            "method": "text_classification",
-        }
-
         # Build analysis metadata
         analysis_metadata = {
             "window_duration_m": window_duration_m,
@@ -383,6 +487,8 @@ def run_summarization(
             "topics": topic_names,
         }
 
+        # Emit to main blocks bucket (by category)
+        bucket_id = f"aw-llm-blocks_{hostname}"
         emit_blocks_to_aw(
             final_blocks,
             host=aw_host,
@@ -391,7 +497,27 @@ def run_summarization(
             model_info=model_info,
             analysis_metadata=analysis_metadata,
         )
-        LOG.info(f"Emitted {len(final_blocks)} blocks total.")
+        LOG.info(f"Emitted {len(final_blocks)} blocks to {bucket_id}")
+
+        # NEW: Emit to per-project buckets
+        project_bucket_prefix = f"aw-llm-project_{hostname}"
+        emit_project_blocks_to_aw(
+            final_blocks,
+            host=aw_host,
+            bucket_prefix=project_bucket_prefix,
+            client_name="aw-llm-worker",
+            model_info=model_info,
+            analysis_metadata=analysis_metadata,
+        )
+
+        # Log summary
+        enriched_count = sum(
+            1 for b in final_blocks if b.get("enriched_with_screenshots")
+        )
+        if enriched_count:
+            LOG.info(
+                f"{enriched_count}/{len(final_blocks)} blocks were enriched with screenshots"
+            )
     else:
         LOG.info("No blocks found to emit.")
 
@@ -526,6 +652,12 @@ def run_summarization(
     default=False,
     help="Debug mode: print formatted event text and exit (no LLM).",
 )
+@click.option(
+    "--force-screenshot-enrichment",
+    is_flag=True,
+    default=False,
+    help="Always enrich all windows with screenshots, bypassing LLM decision.",
+)
 def main(
     mode,
     spool_dir,
@@ -551,6 +683,7 @@ def main(
     sketch_dim,
     dt_seconds,
     debug_format,
+    force_screenshot_enrichment,
 ):
     """ActivityWatch LLM Worker - Dual-mode: Screenshot classification + Time summarization."""
     logging.basicConfig(
@@ -852,6 +985,8 @@ def main(
                         cli_path=cli_path,
                         log_level=log_level,
                         ctx=ctx,
+                        spool_dir=spool_dir,
+                        force_screenshot_enrichment=force_screenshot_enrichment,
                     )
                     last_summarization = now
 
