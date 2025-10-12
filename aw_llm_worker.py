@@ -287,8 +287,36 @@ def run_summarization(
     # 6. Emit all found blocks to ActivityWatch
     if final_blocks:
         bucket_id = f"aw-llm-blocks_{hostname}"
+        
+        # Build model info similar to screenshot format
+        model_info = {
+            "model": os.path.basename(model_path),
+            "backend": "cli" if use_cli else "python",
+            "temperature": temp,
+            "max_tokens": max_new,
+            "method": "text_classification",
+        }
+        
+        # Build analysis metadata
+        analysis_metadata = {
+            "window_duration_m": window_duration_m,
+            "window_step_m": window_step_m,
+            "merge_gap_s": merge_gap_s,
+            "min_confidence": min_confidence,
+            "lookback_hours": lookback_hours,
+            "sketch_dim": sketch_dim,
+            "dt_seconds": dt_seconds,
+            "num_source_buckets": len(source_buckets),
+            "topics": topic_names,
+        }
+        
         emit_blocks_to_aw(
-            final_blocks, host=aw_host, bucket_id=bucket_id, client_name="aw-llm-worker"
+            final_blocks, 
+            host=aw_host, 
+            bucket_id=bucket_id, 
+            client_name="aw-llm-worker",
+            model_info=model_info,
+            analysis_metadata=analysis_metadata,
         )
         LOG.info(f"Emitted {len(final_blocks)} blocks total.")
     else:

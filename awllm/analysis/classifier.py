@@ -209,7 +209,7 @@ def merge_classified_windows(
         min_confidence: Minimum confidence threshold to include a window.
 
     Returns:
-        List of merged time blocks with start, end, label, and average confidence.
+        List of merged time blocks with rich structure similar to screenshot events.
     """
     if not classified_windows:
         return []
@@ -232,6 +232,8 @@ def merge_classified_windows(
         "end": valid_windows[0]["end"],
         "label": valid_windows[0]["label"],
         "confidences": [valid_windows[0]["confidence"]],
+        "content_samples": [valid_windows[0].get("content", "")[:200]],  # Keep samples
+        "num_windows": 1,
     }
 
     for window in valid_windows[1:]:
@@ -242,14 +244,24 @@ def merge_classified_windows(
         if same_label and gap_seconds <= merge_gap_s:
             current_block["end"] = window["end"]
             current_block["confidences"].append(window["confidence"])
+            current_block["num_windows"] += 1
+            # Keep up to 3 content samples for reference
+            if len(current_block["content_samples"]) < 3:
+                current_block["content_samples"].append(window.get("content", "")[:200])
         else:
             # Finalize current block
+            duration_s = (current_block["end"] - current_block["start"]).total_seconds()
             blocks.append(
                 {
                     "start": current_block["start"].isoformat(),
                     "end": current_block["end"].isoformat(),
                     "label": current_block["label"],
                     "confidence": float(np.mean(current_block["confidences"])),
+                    "duration_minutes": round(duration_s / 60, 1),
+                    "num_windows": current_block["num_windows"],
+                    "content_sample": current_block["content_samples"][0] if current_block["content_samples"] else "",
+                    "min_confidence": float(min(current_block["confidences"])),
+                    "max_confidence": float(max(current_block["confidences"])),
                 }
             )
 
@@ -259,15 +271,23 @@ def merge_classified_windows(
                 "end": window["end"],
                 "label": window["label"],
                 "confidences": [window["confidence"]],
+                "content_samples": [window.get("content", "")[:200]],
+                "num_windows": 1,
             }
 
     # Don't forget the last block
+    duration_s = (current_block["end"] - current_block["start"]).total_seconds()
     blocks.append(
         {
             "start": current_block["start"].isoformat(),
             "end": current_block["end"].isoformat(),
             "label": current_block["label"],
             "confidence": float(np.mean(current_block["confidences"])),
+            "duration_minutes": round(duration_s / 60, 1),
+            "num_windows": current_block["num_windows"],
+            "content_sample": current_block["content_samples"][0] if current_block["content_samples"] else "",
+            "min_confidence": float(min(current_block["confidences"])),
+            "max_confidence": float(max(current_block["confidences"])),
         }
     )
 

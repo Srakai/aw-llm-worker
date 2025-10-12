@@ -137,12 +137,37 @@ CMAKE_ARGS="-DLLAMA_METAL=on" uv pip install --reinstall --no-cache llama-cpp-py
 ### Summarization Bucket
 
 - **Bucket**: `aw-llm-blocks_{hostname}`
-- **Event Type**: `classified_time`
+- **Event Type**: `app.time.block`
 - **Data Schema**:
   ```json
   {
-    "label": "Coding",
-    "confidence": 0.75
+    "classification": {
+      "label": "Coding",
+      "confidence": 0.75,
+      "min_confidence": 0.65,
+      "max_confidence": 0.85
+    },
+    "analysis": {
+      "duration_minutes": 45.2,
+      "num_windows": 9,
+      "content_sample": "VSCode: classifier.py; Terminal: git commit; Chrome: Python docs...",
+      "method": "llm_text_classification",
+      "window_size_minutes": 30,
+      "window_step_minutes": 5
+    },
+    "llm": {
+      "model": "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+      "backend": "python",
+      "temperature": 0.2,
+      "max_tokens": 256,
+      "method": "text_classification"
+    },
+    "config": {
+      "merge_gap_s": 300,
+      "min_confidence": 0.3,
+      "lookback_hours": 8.0,
+      "topics": ["Coding", "Writing", "Reading"]
+    }
   }
   ```
 
