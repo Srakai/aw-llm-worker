@@ -259,7 +259,11 @@ def merge_classified_windows(
                     "confidence": float(np.mean(current_block["confidences"])),
                     "duration_minutes": round(duration_s / 60, 1),
                     "num_windows": current_block["num_windows"],
-                    "content_sample": current_block["content_samples"][0] if current_block["content_samples"] else "",
+                    "content_sample": (
+                        current_block["content_samples"][0]
+                        if current_block["content_samples"]
+                        else ""
+                    ),
                     "min_confidence": float(min(current_block["confidences"])),
                     "max_confidence": float(max(current_block["confidences"])),
                 }
@@ -285,7 +289,11 @@ def merge_classified_windows(
             "confidence": float(np.mean(current_block["confidences"])),
             "duration_minutes": round(duration_s / 60, 1),
             "num_windows": current_block["num_windows"],
-            "content_sample": current_block["content_samples"][0] if current_block["content_samples"] else "",
+            "content_sample": (
+                current_block["content_samples"][0]
+                if current_block["content_samples"]
+                else ""
+            ),
             "min_confidence": float(min(current_block["confidences"])),
             "max_confidence": float(max(current_block["confidences"])),
         }

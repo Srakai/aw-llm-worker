@@ -85,9 +85,9 @@ def load_events_for_discretization(
 
 
 def emit_blocks_to_aw(
-    segments: List[Dict], 
-    host: str, 
-    bucket_id: str, 
+    segments: List[Dict],
+    host: str,
+    bucket_id: str,
     client_name: str,
     model_info: Dict = None,
     analysis_metadata: Dict = None,
@@ -119,7 +119,7 @@ def emit_blocks_to_aw(
         for seg in segments:
             st = datetime.fromisoformat(seg["start"])
             en = datetime.fromisoformat(seg["end"])
-            
+
             # Build rich structured data similar to screenshot format
             event_data = {
                 "classification": {
@@ -133,15 +133,23 @@ def emit_blocks_to_aw(
                     "num_windows": seg.get("num_windows", 1),
                     "content_sample": seg.get("content_sample", ""),
                     "method": "llm_text_classification",
-                    "window_size_minutes": analysis_metadata.get("window_duration_m") if analysis_metadata else None,
-                    "window_step_minutes": analysis_metadata.get("window_step_m") if analysis_metadata else None,
+                    "window_size_minutes": (
+                        analysis_metadata.get("window_duration_m")
+                        if analysis_metadata
+                        else None
+                    ),
+                    "window_step_minutes": (
+                        analysis_metadata.get("window_step_m")
+                        if analysis_metadata
+                        else None
+                    ),
                 },
             }
-            
+
             # Add model info if provided
             if model_info:
                 event_data["llm"] = model_info
-            
+
             # Add analysis metadata if provided
             if analysis_metadata:
                 event_data["config"] = {
@@ -149,7 +157,7 @@ def emit_blocks_to_aw(
                     "min_confidence": analysis_metadata.get("min_confidence"),
                     "lookback_hours": analysis_metadata.get("lookback_hours"),
                 }
-            
+
             payload.append(
                 {
                     "timestamp": seg["start"],
