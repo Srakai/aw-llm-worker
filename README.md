@@ -3,11 +3,11 @@
 ActivityWatch worker with dual functionality:
 
 1. **Time Summarization** (main feature) - Analyze ActivityWatch events and classify time blocks using text convolution
-2. **Screenshot Classification** (optional) - LLM-based screenshot labeling
+2. **Screenshot Classification** (optional) - multimodal LLM screenshot labeling
 
 ## Features
 
-- Agregates aw events into 30 min windows
+- Agregates aw events into 30 min windows and summarizes them using LLM
 - Currently integrates with `aw-watcher-window`, `aw-watcher-afk`, `aw-watcher-vscode` and `aw-watcher-screenshot`
 - Uses text convolution with keyword-based topic kernels for time classification (unstable)
 - Automatically classifies screenshots from ActivityWatch watcher
