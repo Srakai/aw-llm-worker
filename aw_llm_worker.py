@@ -352,20 +352,24 @@ def run_summarization(
                 w for w in classified_windows if w.get("request_screenshot_analysis")
             ]
 
-        if screenshot_requests and spool_dir:
+        if screenshot_requests:
             if not force_screenshot_enrichment:
                 LOG.info(
                     f"Found {len(screenshot_requests)} windows requesting screenshot analysis"
                 )
 
+            # Use the raw screenshot bucket (aw-watcher-screenshot, not -llm)
+            screenshot_bucket = f"aw-watcher-screenshot_{hostname}"
+
             for window in screenshot_requests:
                 try:
-                    # Find screenshots for this window
+                    # Find screenshots for this window from ActivityWatch bucket
                     screenshots = find_screenshots_for_window(
-                        spool_dir,
-                        window["start"],
-                        window["end"],
-                        max_screenshots=1,  # Default: 1 screenshot for stability
+                        host=aw_host,
+                        bucket_id=screenshot_bucket,
+                        window_start=window["start"],
+                        window_end=window["end"],
+                        max_screenshots=3,  # Default: 1 screenshot for stability
                     )
 
                     if screenshots:
@@ -421,10 +425,6 @@ def run_summarization(
                 except Exception as e:
                     LOG.error(f"Failed to refine window with screenshots: {e}")
                     continue
-        elif screenshot_requests and not spool_dir:
-            LOG.warning(
-                f"{len(screenshot_requests)} windows requested screenshots, but no spool-dir provided"
-            )
 
     except Exception as e:
         LOG.error(f"Failed to classify windows: {e}")

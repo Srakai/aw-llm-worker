@@ -4,6 +4,7 @@ import requests
 import logging
 import os
 import glob
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Tuple, Optional
 from .aggregator import Event
@@ -440,6 +441,10 @@ def emit_project_blocks_to_aw(
     if not segments:
         return
 
+    # Extract hostname from bucket_prefix (format: aw-llm-project_{hostname})
+    # The bucket_prefix should contain the hostname after the last underscore
+    hostname = bucket_prefix.split("_", 1)[1] if "_" in bucket_prefix else "unknown"
+
     # Group segments by project
     by_project = {}
     for seg in segments:
@@ -461,7 +466,7 @@ def emit_project_blocks_to_aw(
             bucket_data = {
                 "client": client_name,
                 "type": "app.project.block",
-                "hostname": bucket_id.split("_")[-1] if "_" in bucket_id else "unknown",
+                "hostname": hostname,
             }
 
             resp = requests.post(
@@ -538,15 +543,17 @@ def emit_project_blocks_to_aw(
 
 
 def find_screenshots_for_window(
-    spool_dir: str,
+    host: str,
+    bucket_id: str,
     window_start: datetime,
     window_end: datetime,
     max_screenshots: int = 1,
 ) -> List[str]:
-    """Find screenshot files that fall within a time window.
+    """Find screenshot files that fall within a time window from ActivityWatch bucket.
 
     Args:
-        spool_dir: Directory containing screenshot spool files
+        host: ActivityWatch server URL
+        bucket_id: Screenshot bucket ID (e.g., 'aw-watcher-screenshot_hostname')
         window_start: Start time of the window
         window_end: End time of the window
         max_screenshots: Maximum number of screenshots to return
@@ -554,69 +561,60 @@ def find_screenshots_for_window(
     Returns:
         List of screenshot file paths that fall within the window
     """
-    if not spool_dir or not os.path.exists(spool_dir):
+    if not host or not bucket_id:
         return []
 
-    # Find all JSON spool files
-    spool_files = sorted(
-        glob.glob(os.path.join(spool_dir, "*.json")),
-        key=os.path.getmtime,
-        reverse=True,  # Most recent first
-    )
+    try:
+        # Fetch screenshot events from ActivityWatch bucket
+        # Add a small buffer to the time range
+        buffer_minutes = 2
+        start_with_buffer = window_start - timedelta(minutes=buffer_minutes)
+        end_with_buffer = window_end + timedelta(minutes=buffer_minutes)
 
-    matching_screenshots = []
+        url = f"{host}/api/0/buckets/{bucket_id}/events"
+        params = {"start": _iso(start_with_buffer), "end": _iso(end_with_buffer)}
 
-    for spool_file in spool_files:
-        try:
-            import json
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        events = resp.json()
 
-            with open(spool_file, "r") as f:
-                rec = json.load(f)
+        if not events:
+            return []
 
-            # Get timestamp and image path
-            ts_str = rec.get("ts")
-            img_path = rec.get("path")
+        matching_screenshots = []
 
-            if not ts_str or not img_path or not os.path.exists(img_path):
-                continue
-
-            # Parse timestamp - handle both standard ISO format and screenshot watcher format
-            # Screenshot watcher may use format like: "2025-10-10T22-37-01.006+00-00"
-            # We need to convert it to: "2025-10-10T22:37:01.006+00:00"
-            ts_normalized = ts_str.replace("Z", "+00:00")
-
-            # Fix the time portion if it uses hyphens instead of colons
-            # Match pattern: T[hour]-[min]-[sec]
-            import re
-
-            ts_normalized = re.sub(
-                r"T(\d{2})-(\d{2})-(\d{2})", r"T\1:\2:\3", ts_normalized
-            )
-
-            # Fix the timezone portion if it uses hyphens
-            # Match pattern: +00-00 or -00-00 at the end
-            ts_normalized = re.sub(r"([+-]\d{2})-(\d{2})$", r"\1:\2", ts_normalized)
-
+        for event in events:
             try:
-                ts_dt = datetime.fromisoformat(ts_normalized)
-            except ValueError as e:
-                LOG.debug(
-                    f"Could not parse timestamp '{ts_str}' (normalized: '{ts_normalized}'): {e}"
-                )
+                # Get timestamp and image path from event data
+                ts_str = event.get("timestamp")
+                data = event.get("data", {})
+                img_path = data.get("path")
+
+                if not ts_str or not img_path:
+                    continue
+
+                # Check if file exists
+                if not os.path.exists(img_path):
+                    LOG.debug(f"Screenshot file not found: {img_path}")
+                    continue
+
+                # Parse timestamp
+                ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+
+                # Check if screenshot falls within window
+                if ts_dt >= window_start and ts_dt <= window_end:
+                    matching_screenshots.append(img_path)
+
+            except Exception as e:
+                LOG.debug(f"Error processing screenshot event: {e}")
                 continue
 
-            # Check if screenshot falls within window (with small buffer)
-            buffer_minutes = 2
-            if ts_dt >= window_start - timedelta(
-                minutes=buffer_minutes
-            ) and ts_dt <= window_end + timedelta(minutes=buffer_minutes):
-                matching_screenshots.append(img_path)
+        # Randomly select screenshots
+        if len(matching_screenshots) > max_screenshots:
+            matching_screenshots = random.sample(matching_screenshots, max_screenshots)
 
-                if len(matching_screenshots) >= max_screenshots:
-                    break
+        return matching_screenshots
 
-        except Exception as e:
-            LOG.debug(f"Error reading spool file {spool_file}: {e}")
-            continue
-
-    return matching_screenshots
+    except requests.RequestException as e:
+        LOG.warning(f"Error fetching screenshots from bucket {bucket_id}: {e}")
+        return []
