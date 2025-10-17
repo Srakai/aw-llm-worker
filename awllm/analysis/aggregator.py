@@ -54,10 +54,6 @@ def clean_event_text(text: str) -> str:
     # Remove trailing usernames (Filip, etc.)
     text = re.sub(r"\s+\w+\s*$", "", text)
 
-    # Remove "BEST" workspace tags
-    text = re.sub(r"\s+BEST\s*$", "", text)
-    text = re.sub(r"\s+—\s+BEST\s*$", "", text)
-
     # Shorten common app names
     text = re.sub(r"\s+Google Chrome\s*", " Chrome ", text)
     text = re.sub(r"^Chrome\s+", "", text)  # Remove Chrome prefix
