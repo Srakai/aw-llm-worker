@@ -5,6 +5,8 @@ ActivityWatch worker with dual functionality:
 1. **Time Summarization** (main feature) - Analyze ActivityWatch events and classify time blocks using text convolution
 2. **Screenshot Classification** (optional) - multimodal LLM screenshot labeling
 
+![ActivityWatch Timeline](docs/sc.png)
+
 ## Features
 
 - Agregates aw events into 30 min windows and summarizes them using LLM
